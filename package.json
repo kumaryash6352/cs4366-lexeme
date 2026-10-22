@@ -1,0 +1,33 @@
+{
+  "name": "lexeme",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsc -p tsconfig.electron.json && node scripts/dev.mjs",
+    "build": "tsc -b && vite build",
+    "lint": "oxlint",
+    "preview": "vite preview",
+    "dev:web": "vite --host 127.0.0.1",
+    "start": "electron .",
+    "typecheck": "tsc -b"
+  },
+  "dependencies": {
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "electron": "^45.0.0",
+    "oxlint": "^1.88.0",
+    "typescript": "~6.0.3",
+    "vite": "^8.3.4"
+  },
+  "main": "dist-electron/main.js",
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

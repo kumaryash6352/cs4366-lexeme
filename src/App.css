@@ -1,0 +1,25 @@
+.app { height: 100vh; display: flex; flex-direction: column; }
+.toolbar { display: flex; align-items: center; gap: 22px; padding: 20px 28px; border-bottom: 1px solid #2a3140; }
+.brand { display: flex; align-items: center; gap: 12px; }
+.logo { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: #a8c7fa; color: #16243a; font-weight: 800; }
+h1 { font-size: 21px; letter-spacing: -.6px; margin: 0; }
+.subtitle, .muted { color: #9aa8bc; font-size: 13px; }
+.badge { margin-left: auto; font-size: 12px; color: #b1c9ef; border: 1px solid #35455f; border-radius: 20px; padding: 6px 12px; }
+.workspace { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: #2a3140; }
+.pane { background: #141a24; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.pane-header { height: 58px; padding: 0 22px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #2a3140; }
+h2 { margin: 0; font-size: 13px; font-weight: 600; }
+button { color: #afc8f0; background: transparent; border: 1px solid #35455f; border-radius: 6px; padding: 6px 10px; font-size: 12px; }
+button:hover { background: #25324a; }
+.file-label { padding: 13px 22px; font-size: 12px; color: #c6d6f1; background: #18212e; }
+.file-label span { float: right; color: #8d9bb0; }
+textarea { resize: none; flex: 1; width: 100%; min-height: 0; border: 0; padding: 24px 22px; color: #ccd9ed; background: #111720; font: 13px/1.8 'SFMono-Regular', Consolas, monospace; tab-size: 4; }
+.graph-pane { background-image: radial-gradient(#2a3549 1px, transparent 1px); background-size: 22px 22px; }
+.graph-pane .pane-header, .graph-modes { background: #141a24; }
+.empty-state { flex: 1; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; padding: 28px; }
+.graph-mark { font-size: 66px; color: #9ebceb; }
+h3 { font-size: 22px; font-weight: 500; letter-spacing: -.5px; margin: 12px 0; }
+.empty-state p { max-width: 330px; font-size: 13px; line-height: 1.7; margin: 4px 0; }
+.graph-modes { border-top: 1px solid #2a3140; color: #9aa8bc; font-size: 11px; padding: 15px 22px; text-align: center; }
+footer { display: flex; justify-content: space-between; padding: 10px 22px; border-top: 1px solid #2a3140; color: #9aa8bc; font-size: 11px; }
+@media (max-width: 760px) { .subtitle { display: none; } .toolbar { padding: 16px 22px; } }
