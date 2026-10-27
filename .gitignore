@@ -25,3 +25,6 @@ dist-ssr
 
 # Compiled Electron main process
 dist-electron
+
+#build info 
+*.tsbuldinfo

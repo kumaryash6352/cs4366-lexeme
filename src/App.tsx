@@ -1,15 +1,46 @@
 import { useState } from 'react'
 import './App.css'
 
-const example = `#include <stdio.h>
+const example = `
+#include <stdio.h>
+#include <stdlib.h>
+
+int calculate(int *a, int *b);
 
 int main(void) {
-    int total = 0;
-    for (int i = 0; i < 10; i++) {
-        total += i;
+    int *a = malloc(sizeof(int));
+    int *b = malloc(sizeof(int));
+
+    if (a == NULL || b == NULL) {
+        free(a);
+        free(b);
+        return 1;
     }
-    printf("total: %d\\n", total);
+
+    printf("Please enter the value for a: ");
+    if (scanf("%d", a) != 1) {
+        free(a);
+        free(b);
+        return 1;
+    }
+
+    printf("Please enter the value for b: ");
+    if (scanf("%d", b) != 1) {
+        free(a);
+        free(b);
+        return 1;
+    }
+
+    int result = calculate(a, b);
+    printf("\nThe result is: %d\n", result);
+
+    free(a);
+    free(b);
     return 0;
+}
+
+int calculate(int *a, int *b) {
+    return *a + *b;
 }
 `
 
