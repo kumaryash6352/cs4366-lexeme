@@ -15,12 +15,14 @@ npm start         # run build first
 
 ### Backend
 
-> |---- backend/
-> |   |---- routes/
-> |   |   |---- loader.ts
-> |   |   |---- analyze.ts
-> |   |---- app.ts    # main backend code
-> |   |---- server.ts # will soon contain sever code
+```text
+backend/
+├── routes/
+│   ├── loader.ts
+│   └── analyze.ts
+├── app.ts    # main backend code
+└── server.ts # will soon contain server code
+```
 
 #### install: 
 ```sh
