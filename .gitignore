@@ -27,4 +27,4 @@ dist-ssr
 dist-electron
 
 #build info 
-.tsbuldinfo
+*.tsbuldinfo
