@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "operation": "parse",
+  "source": "#include <stdio.h>\n\nint main(void) {\n    int total = 0;\n    for (int i = 0; i < 10; i++) {\n        total += i;\n    }\n    printf(\"total: %d\\n\", total);\n    return 0;\n}\n",
+  "entryFile": "main.c",
+  "includeDirs": ["."],
+  "defines": ["DEBUG", "LIMIT=10"]
+}

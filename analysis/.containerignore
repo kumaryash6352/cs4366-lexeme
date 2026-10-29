@@ -1,0 +1,4 @@
+*
+!Containerfile
+!worker/
+!worker/**
