@@ -1,6 +1,6 @@
 import { copyFile, lstat, mkdir, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
-import type { AnalysisRequest } from '../shared/contracts.js'
+import type { AnalysisRequest } from './contracts.js'
 
 export async function stageRequest(request: AnalysisRequest, jobId: string, jobDir: string, signal: AbortSignal, excludedRoot = dirname(jobDir)): Promise<void> {
   const source = join(jobDir, 'input', 'source')

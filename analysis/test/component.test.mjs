@@ -4,9 +4,9 @@ import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AnalysisService } from '../dist/index.js'
-import { AnalysisSetup } from '../dist/setup/prepare.js'
-import { PodmanRuntime } from '../dist/runtime/environment.js'
-import { parseRequest, parseResult } from '../dist/shared/contracts.js'
+import { AnalysisSetup } from '../dist/prepare.js'
+import { PodmanRuntime } from '../dist/environment.js'
+import { parseRequest, parseResult } from '../dist/contracts.js'
 
 const request = fields => ({ schemaVersion: 1, operation: 'parse', ...fields })
 const ok = (stdout = '') => ({ code: 0, stdout, stderr: '' })
@@ -44,6 +44,32 @@ test('simultaneous setup requests share one image build', async () => {
   assert.equal(images[0], images[1])
   assert.equal(fake.calls.filter(call => call[1] === 'build').length, 1)
   assert.equal(fake.calls.filter(call => call[1] === '--version').length, 1)
+})
+
+test('build explicitly uses the effective cgroup manager, including the sessionless fallback', async () => {
+  for (const manager of ['cgroupfs', 'systemd']) {
+    const fake = fakePodman({ command: async (_program, args) => {
+      if (args[0] === 'info') {
+        const info = JSON.parse(runtimeInfo)
+        info.host.cgroupManager = manager
+        return ok(JSON.stringify(info))
+      }
+      // Model old Buildah ignoring Podman's implicit cgroupfs fallback.
+      if (args.includes('build') && args[0] !== `--cgroup-manager=${manager}`) {
+        return { code: 125, stdout: '', stderr: 'sd-bus call: Input/output error' }
+      }
+    } })
+    await new AnalysisSetup({ command: fake.command, platform: 'linux' }).prepare()
+    const build = fake.calls.find(call => call.includes('build'))
+    assert.deepEqual(build.slice(0, 3), ['podman', `--cgroup-manager=${manager}`, 'build'])
+    assert.ok(fake.calls.some(call => call.includes('--self-check')))
+
+    fake.calls.length = 0
+    const image = 'registry.example.com/team/analysis:latest'
+    await new AnalysisSetup({ command: fake.command, platform: 'linux', image }).prepare()
+    assert.ok(!fake.calls.some(call => call.includes('build')))
+    assert.deepEqual(fake.calls.find(call => call.includes('pull')), ['podman', 'pull', image])
+  }
 })
 
 test('missing executable triggers Ubuntu installation, but failed runtime checks never reinstall', async () => {

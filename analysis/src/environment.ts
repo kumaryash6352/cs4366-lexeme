@@ -1,8 +1,8 @@
-import { assertSuccess, runCommand } from '../shared/command.js'
-import type { Command } from '../shared/command.js'
-import { selectedImage, setupInstruction } from '../shared/config.js'
-import type { Notify } from '../shared/config.js'
-import { assertSupportedPlatform, checkRuntime } from '../shared/podman.js'
+import { assertSuccess, runCommand } from './command.js'
+import type { Command } from './command.js'
+import { selectedImage, setupInstruction } from './config.js'
+import type { Notify } from './config.js'
+import { assertSupportedPlatform, checkRuntime } from './podman.js'
 
 export interface RuntimeOptions {
   command?: Command

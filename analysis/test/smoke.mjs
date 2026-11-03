@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { AnalysisService } from '../dist/index.js'
-import { runCommand } from '../dist/shared/command.js'
+import { runCommand } from '../dist/command.js'
 
 const service = new AnalysisService()
 const request = fields => ({ schemaVersion: 1, operation: 'parse', ...fields })

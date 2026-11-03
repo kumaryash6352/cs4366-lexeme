@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { installPodman } from '../dist/setup/installation.js'
+import { installPodman } from '../dist/installation.js'
 const ok = () => ({ code: 0, stdout: '', stderr: '' })
 
 test('Ubuntu installation uses apt and stops on failure', async () => {

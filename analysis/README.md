@@ -8,19 +8,16 @@ Run from the repository root on Ubuntu.
 analysis/
   Containerfile
   src/
-    setup/
-      cli.ts                Setup command
-      prepare.ts            Build and verify image
-      installation.ts       Install Podman with apt
-    runtime/
-      environment.ts        Check Podman and image
-      service.ts            Container and job lifecycle
-      staging.ts            Prepare job files
-    shared/
-      config.ts             Image name and paths
-      podman.ts             Runtime checks
-      command.ts            Command execution
-      contracts.ts          Request/result validation
+    setup.ts                Image preparation command
+    prepare.ts              Build/pull and verify image
+    installation.ts         Install Podman with apt
+    environment.ts          Check Podman and image
+    service.ts              Container and job lifecycle
+    staging.ts              Prepare job files
+    config.ts               Image name and paths
+    podman.ts               Runtime checks
+    command.ts              Command execution
+    contracts.ts            Request/result validation
     index.ts                Backend API
   worker/main.mjs           Container worker
   test/                     Tests and sample inputs
@@ -29,19 +26,40 @@ analysis/
   .jobs/                    Job inputs and results
 ```
 
+Host-side modules live directly in `src/`. The container worker remains in
+`worker/`, which the Containerfile copies into the image.
+
+With a published worker image, the backend host needs Podman and a local copy of
+that image; it does not need to build the toolchain image. Set
+`LEXEME_ANALYSIS_IMAGE` and run the preparation command to pull and verify it
+(see Optional configuration below). `setup.ts` remains a maintenance command for
+local image builds or pulling published images, separate from runtime startup.
+This layout change does not add dependency-specific images or CMake build jobs.
+
 ## Setup
 
 ```sh
+# This project requires Node.js >=22.12.0
+curl -fsSL https://deb.nodesource.com/setup_22.x -o nodesource_setup.sh
+sudo -E bash nodesource_setup.sh
+sudo apt install -y nodejs
+
 npm ci
 npx --no-install tsc -p analysis/tsconfig.json
-sudo -v
-node analysis/dist/setup/cli.js
+node analysis/dist/setup.js
 ```
 
 Image: `localhost/podmananalysiscontainer` (implicit `:latest`).
 Base: `docker.io/library/node:22-bookworm-slim`.
 Includes GCC, Make, CMake, Python, certificates, and the worker.
 Each setup run builds/verifies the image and attempts to remove the replaced image.
+
+Setup passes the cgroup manager reported by `podman info` explicitly to the image
+build. This handles older Podman/Buildah versions on WSL or terminals without a
+systemd user session, where the automatic `cgroupfs` fallback can otherwise fail
+at a `RUN` step with `sd-bus call: Input/output error`. If running an older compiled
+setup, recompile with `npx --no-install tsc -p analysis/tsconfig.json` and rerun
+`node analysis/dist/setup.js` as your normal user.
 
 The structure covers image preparation, host-side job coordination, and container-side
 execution for the current prototype. The worker currently checks C11 syntax and
@@ -51,7 +69,7 @@ Choose additional packages based on the analysis operations you implement.
 To extend the image, edit `analysis/Containerfile`: add system packages to
 `apt-get install`, other installation steps with `RUN`, and files with `COPY`.
 Implement the operations that use those tools in `analysis/worker/main.mjs`.
-`src/setup/prepare.ts` orchestrates the build; `src/setup/installation.ts` installs
+`src/prepare.ts` orchestrates the build; `src/installation.ts` installs
 Podman on the host. Installing a background service in the image does not start it:
 the current worker's `--serve` mode only keeps the container alive. Any additional
 service needs startup/shutdown logic. Runtime containers have networking disabled.
@@ -75,7 +93,7 @@ See [the test README](test/README.md) for coverage, prerequisites, and expected 
 npx --no-install tsc -p analysis/tsconfig.json
 
 # Rebuild after Containerfile or worker changes
-node analysis/dist/setup/cli.js
+node analysis/dist/setup.js
 
 node --test analysis/test/*.test.mjs
 node analysis/test/smoke.mjs
@@ -126,7 +144,7 @@ path. The default job timeout is 60 seconds; configure it with
 ### Runtime input
 
 `submit()` accepts a JavaScript object with this JSON shape. The full validation
-contract is in `analysis/src/shared/contracts.ts`.
+contract is in `analysis/src/contracts.ts`.
 
 ```json
 {
@@ -241,9 +259,9 @@ podman rm analysis-dev
 ## Optional configuration
 
 ```sh
-LEXEME_AUTO_INSTALL_PODMAN=0 node analysis/dist/setup/cli.js
+LEXEME_AUTO_INSTALL_PODMAN=0 node analysis/dist/setup.js
 
 # Custom worker image (setup pulls instead of building)
 export LEXEME_ANALYSIS_IMAGE=registry.example.com/team/analysis:latest
-node analysis/dist/setup/cli.js
+node analysis/dist/setup.js
 ```

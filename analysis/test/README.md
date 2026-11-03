@@ -35,7 +35,7 @@ and cleanup. Requires Ubuntu and working rootless Podman.
 sudo -v
 
 # Prepare image; repeat after Containerfile or worker changes
-node analysis/dist/setup/cli.js
+node analysis/dist/setup.js
 
 # Run the end-to-end test
 node analysis/test/smoke.mjs

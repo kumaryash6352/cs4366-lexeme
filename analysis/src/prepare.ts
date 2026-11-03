@@ -1,9 +1,9 @@
 import { join } from 'node:path'
-import { assertSuccess, runCommand } from '../shared/command.js'
-import type { Command } from '../shared/command.js'
-import { analysisRoot, selectedImage } from '../shared/config.js'
-import type { Notify } from '../shared/config.js'
-import { assertSupportedPlatform, checkRuntime } from '../shared/podman.js'
+import { assertSuccess, runCommand } from './command.js'
+import type { Command } from './command.js'
+import { analysisRoot, selectedImage } from './config.js'
+import type { Notify } from './config.js'
+import { assertSupportedPlatform, checkRuntime } from './podman.js'
 import { installPodman } from './installation.js'
 
 export interface SetupOptions {
@@ -54,7 +54,7 @@ export class AnalysisSetup {
       }
     }
     this.emit('checking-runtime', 'Checking rootless Podman runtime')
-    await checkRuntime(this.command)
+    const cgroupManager = await checkRuntime(this.command)
     const configuredImage = this.options.image ?? process.env.LEXEME_ANALYSIS_IMAGE
     const image = selectedImage(this.options.image)
     this.emit('checking-image', image)
@@ -64,6 +64,9 @@ export class AnalysisSetup {
     if (exists.code === 0) previousId = await this.imageId(image)
     this.emit('preparing-image', configuredImage ? `Pulling ${image}` : `Building ${image}`)
     const args = configuredImage ? ['pull', image] : ['build', '--tag', image, '--file', join(analysisRoot, 'Containerfile'), analysisRoot]
+    // Older Podman/Buildah versions do not propagate Podman's automatic
+    // cgroupfs fallback to build containers when no systemd user session exists.
+    if (!configuredImage && cgroupManager) args.unshift(`--cgroup-manager=${cgroupManager}`)
     assertSuccess(await this.command('podman', args, {
       timeoutMs: 900_000,
       onStdout: text => this.emit('preparing-image', text.slice(-2000)),

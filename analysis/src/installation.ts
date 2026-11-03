@@ -1,7 +1,7 @@
 import { readFile } from 'node:fs/promises'
-import { assertSuccess } from '../shared/command.js'
-import type { Command } from '../shared/command.js'
-import type { Notify } from '../shared/config.js'
+import { assertSuccess } from './command.js'
+import type { Command } from './command.js'
+import type { Notify } from './config.js'
 
 export async function installPodman(
   command: Command,
