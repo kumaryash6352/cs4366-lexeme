@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { AnalysisService } from '../dist/index.js'
 import { PodmanRuntime } from '../dist/environment.js'
 import { parseRequest, parseResult } from '../dist/contracts.js'
+import { getAnalysisRequest } from './mock-backend.mjs'
 
 const request = fields => ({ schemaVersion: 1, operation: 'parse', ...fields })
 const ok = (stdout = '') => ({ code: 0, stdout, stderr: '' })
@@ -35,17 +36,40 @@ test('request boundary rejects traversal and ambiguous input; result must belong
   assert.equal(parseRequest(request({ source: 'int main(void) { return 0; }' })).entryFile, 'main.c')
 })
 
-test('normal startup only checks the prepared image and never installs, builds, or pulls', async () => {
-  const fake = fakePodman({ command: async (_program, args) => args[0] === 'image' && args[1] === 'exists' ? ok() : undefined })
-  const runtime = new PodmanRuntime({ command: fake.command, platform: 'linux', image: 'localhost/podmananalysiscontainer' })
-  assert.equal(await runtime.ensureReady(), 'localhost/podmananalysiscontainer')
-  assert.deepEqual(fake.calls.map(call => call[1]), ['--version', 'info', 'image'])
+test('startup pulls the configured registry image before creating a container', async () => {
+  const fake = fakePodman()
+  const image = 'ghcr.io/your-owner/analysiscontainer:v1'
+  const runtime = new PodmanRuntime({ command: fake.command, platform: 'linux', image })
+  assert.equal(await runtime.ensureReady(), image)
+  assert.deepEqual(fake.calls, [
+    ['podman', '--version'], ['podman', 'info', '--format', 'json'], ['podman', 'pull', image],
+  ])
 })
 
-test('missing image or executable reports external preparation instructions without changing the host', async () => {
-  const missingImage = fakePodman()
-  await assert.rejects(new PodmanRuntime({ command: missingImage.command, platform: 'linux', image: 'localhost/test-worker' }).ensureReady(), /localhost\/test-worker.*podman load/)
-  assert.ok(!missingImage.calls.some(call => ['build', 'pull', 'run'].includes(call[1])))
+test('default image comes from the independent configuration file', async () => {
+  const savedImage = process.env.LEXEME_ANALYSIS_IMAGE
+  delete process.env.LEXEME_ANALYSIS_IMAGE
+  try {
+    const config = JSON.parse(await readFile(new URL('../runtime.config.json', import.meta.url), 'utf8'))
+    const fake = fakePodman()
+    const runtime = new PodmanRuntime({ command: fake.command, platform: 'linux' })
+    assert.equal(await runtime.ensureReady(), config.image)
+    assert.deepEqual(fake.calls.at(-1), ['podman', 'pull', config.image])
+  } finally {
+    if (savedImage === undefined) delete process.env.LEXEME_ANALYSIS_IMAGE
+    else process.env.LEXEME_ANALYSIS_IMAGE = savedImage
+  }
+})
+
+test('registry failures stop startup without falling back to a cached image', async () => {
+  const fake = fakePodman({ command: async (_program, args) => args[0] === 'pull'
+    ? { code: 125, stdout: '', stderr: 'registry access denied' } : undefined })
+  const runtime = new PodmanRuntime({ command: fake.command, platform: 'linux' })
+  await assert.rejects(runtime.ensureReady(), /registry access denied/)
+  assert.ok(!fake.calls.some(call => ['run', 'image', 'build'].includes(call[1])))
+})
+
+test('missing Podman reports host preparation instructions', async () => {
   const missingPodman = fakePodman({ command: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }) } })
   await assert.rejects(new PodmanRuntime({ command: missingPodman.command, platform: 'linux' }).ensureReady(), /Install Podman on the backend host/)
   assert.equal(missingPodman.calls.length, 1)
@@ -66,11 +90,11 @@ test('unsupported hosts and nonlocal or rootful Podman fail before image lookup'
   }
 })
 
-test('Podman failures preserve diagnostics without attempting image preparation', async () => {
-  for (const stage of ['info', 'image']) {
+test('Podman failures preserve diagnostics', async () => {
+  for (const stage of ['info', 'pull']) {
     const fake = fakePodman({ command: async (_program, args) => args[0] === stage ? { code: 125, stdout: '', stderr: 'storage unavailable' } : undefined })
     await assert.rejects(new PodmanRuntime({ command: fake.command, platform: 'linux' }).ensureReady(), /storage unavailable/)
-    assert.deepEqual(fake.calls.map(call => call[1]), stage === 'info' ? ['--version', 'info'] : ['--version', 'info', 'image'])
+    assert.deepEqual(fake.calls.map(call => call[1]), stage === 'info' ? ['--version', 'info'] : ['--version', 'info', 'pull'])
   }
 })
 
@@ -78,6 +102,8 @@ async function serviceFixture(t, behavior = {}) {
   const root = await mkdtemp(join(tmpdir(), 'lexeme-test-'))
   const containers = new Map()
   const removed = []
+  const calls = []
+  const packageCalls = []
   let starts = 0
   let preparations = 0
   let executions = 0
@@ -86,6 +112,7 @@ async function serviceFixture(t, behavior = {}) {
   const environment = {
     ensureReady: async notify => { preparations++; notify?.('image-ready', 'test-image'); return 'test-image' },
     command: async (_program, args, options = {}) => {
+      calls.push(args)
       if (args[0] === 'run') {
         starts++
         const name = args[args.indexOf('--name') + 1]
@@ -95,6 +122,23 @@ async function serviceFixture(t, behavior = {}) {
         return ok('container-id')
       }
       if (args[0] === 'rm') { removed.push(args.at(-1)); containers.delete(args.at(-1)); return ok() }
+      if (args[0] === 'exec' && args.includes('apt-get')) {
+        packageCalls.push(args)
+        assert.equal(args[args.indexOf('--user') + 1], '0:0')
+        assert.ok(containers.has(args[args.indexOf('apt-get') - 1]))
+        assert.equal(options.timeoutMs, 300_000)
+        if (behavior.packageTimeout) throw new Error('podman timed out')
+        if (behavior.packageHang) {
+          await new Promise((resolve, reject) => {
+            options.signal.throwIfAborted()
+            options.signal.addEventListener('abort', () => reject(new Error('Package installation cancelled')), { once: true })
+          })
+        }
+        if (behavior.packageFailure === args[args.indexOf('apt-get') + 1]) {
+          return { code: 100, stdout: '', stderr: 'Unable to install requested dependency' }
+        }
+        return ok()
+      }
       if (args[0] === 'exec' && args.includes('--self-check')) {
         return behavior.failSelfCheck ? { ...ok(), code: 1, stderr: 'self-check failure' } : ok()
       }
@@ -138,11 +182,11 @@ async function serviceFixture(t, behavior = {}) {
   }
   const service = new AnalysisService({ environment, jobsRoot: root, timeoutMs: behavior.timeoutMs ?? 1000 })
   t.after(async () => { await service.shutdown(); await rm(root, { recursive: true, force: true }) })
-  return { service, removed, containers, starts: () => starts, preparations: () => preparations, executions: () => executions, maxActive: () => maxActive }
+  return { service, removed, containers, calls, packageCalls, starts: () => starts, preparations: () => preparations, executions: () => executions, maxActive: () => maxActive }
 }
 
-test('example parsing request is accepted; missing or unsupported protocol is rejected', async () => {
-  const example = JSON.parse(await readFile(new URL('./parse-request.json', import.meta.url), 'utf8'))
+test('mock backend request is accepted; missing or unsupported protocol is rejected', async () => {
+  const example = await getAnalysisRequest()
   assert.equal(parseRequest(example).operation, 'parse')
   assert.throws(() => parseRequest({ source: 'int x;' }), /schemaVersion/)
   assert.throws(() => parseRequest({ ...example, schemaVersion: 2 }), /schemaVersion/)
@@ -246,5 +290,83 @@ test('staging rejects symbolic links without executing a job', async t => {
   const result = await fixture.service.wait(job.id)
   assert.equal(result.status, 'failed')
   assert.match(result.error, /symbolic links/)
+  assert.equal(fixture.executions(), 0)
+})
+
+test('dependency requests reject options, paths and apt removal actions', () => {
+  for (const dependencies of ['zlib1g-dev', ['--allow-unauthenticated'], ['foo;id'], ['/tmp/package.deb'], ['foo-'], ['foo+'], ['foo bar'], [null], Array(65).fill('zlib1g-dev')]) {
+    assert.throws(() => parseRequest(request({ source: 'int x;', dependencies })), /dependencies/)
+  }
+  assert.deepEqual(parseRequest(request({ source: 'int x;' })).dependencies, [])
+  assert.deepEqual(parseRequest(request({ source: 'int x;', dependencies: ['zlib1g-dev', 'zlib1g-dev'] })).dependencies, ['zlib1g-dev'])
+})
+
+test('mock backend folder and dependencies reach staging and container installation before GCC', async t => {
+  const fixture = await serviceFixture(t)
+  const backendRequest = await getAnalysisRequest()
+  await fixture.service.start()
+  const job = fixture.service.submit(backendRequest)
+  const completed = await fixture.service.wait(job.id)
+  assert.equal(completed.status, 'succeeded')
+  assert.match(await readFile(join(fixture.service.jobsRoot, job.id, 'input/source/main.c'), 'utf8'), /#include <zlib.h>/)
+  assert.deepEqual(fixture.packageCalls.map(args => args.slice(args.indexOf('apt-get'))), [
+    ['apt-get', 'update', '--error-on=any'],
+    ['apt-get', 'install', '-y', '--no-install-recommends', '--', 'zlib1g-dev'],
+  ])
+  const installIndex = fixture.calls.findIndex(args => args.includes('install'))
+  const workerIndex = fixture.calls.findIndex(args => args.includes('--job'))
+  assert.ok(installIndex >= 0 && installIndex < workerIndex)
+  assert.ok(completed.events.some(event => event.stage === 'installing-packages'))
+  const run = fixture.calls.find(args => args[0] === 'run')
+  assert.ok(!run.includes('--network=none'))
+  assert.ok(!run.includes('--cap-drop=all'))
+  assert.ok(run.includes('--userns=keep-id'))
+  assert.equal(fixture.starts(), 1)
+})
+
+test('requests without dependencies do not invoke the package manager', async t => {
+  const fixture = await serviceFixture(t)
+  await fixture.service.start()
+  const job = fixture.service.submit(request({ source: 'int x;' }))
+  assert.equal((await fixture.service.wait(job.id)).status, 'succeeded')
+  assert.equal(fixture.packageCalls.length, 0)
+})
+
+test('package failures retire the container and prevent queued analysis from using partial installations', async t => {
+  for (const packageFailure of ['update', 'install']) {
+    const fixture = await serviceFixture(t, { packageFailure })
+    await fixture.service.start()
+    const first = fixture.service.submit(request({ source: 'int x;', dependencies: ['missing-package'] }))
+    const second = fixture.service.submit(request({ source: 'int y;' }))
+    const failed = await fixture.service.wait(first.id)
+    assert.equal(failed.status, 'failed')
+    assert.match(failed.error, /Unable to install/)
+    assert.equal((await fixture.service.wait(second.id)).status, 'failed')
+    assert.equal(fixture.executions(), 0)
+    assert.equal(fixture.containers.size, 0)
+    assert.equal(fixture.removed.length, 1)
+    assert.throws(() => fixture.service.submit(request({ source: 'int z;' })), /restart/)
+  }
+})
+
+test('cancelling package preparation removes its container before accepting further work', async t => {
+  const fixture = await serviceFixture(t, { packageHang: true })
+  await fixture.service.start()
+  const job = fixture.service.submit(request({ source: 'int x;', dependencies: ['zlib1g-dev'] }))
+  while (fixture.packageCalls.length === 0) await new Promise(resolve => setTimeout(resolve, 1))
+  fixture.service.cancel(job.id)
+  assert.equal((await fixture.service.wait(job.id)).status, 'cancelled')
+  assert.equal(fixture.containers.size, 0)
+  assert.equal(fixture.executions(), 0)
+})
+
+test('package execution timeout retires the session before GCC runs', async t => {
+  const fixture = await serviceFixture(t, { packageTimeout: true })
+  await fixture.service.start()
+  const job = fixture.service.submit(request({ source: 'int x;', dependencies: ['zlib1g-dev'] }))
+  const completed = await fixture.service.wait(job.id)
+  assert.equal(completed.status, 'failed')
+  assert.match(completed.error, /timed out/)
+  assert.equal(fixture.containers.size, 0)
   assert.equal(fixture.executions(), 0)
 })

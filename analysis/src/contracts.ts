@@ -6,6 +6,7 @@ export interface AnalysisRequest {
   entryFile: string
   includeDirs: string[]
   defines: string[]
+  dependencies: string[]
 }
 
 export interface WorkerResult {
@@ -54,7 +55,8 @@ export function parseRequest(value: unknown): AnalysisRequest {
     typeof value !== 'string' || value.length > 256 || !/^[A-Za-z_]\w*(=[^\r\n\0]*)?$/.test(value))) {
     throw new Error('defines must contain at most 32 NAME or NAME=value strings')
   }
-  const request: AnalysisRequest = { schemaVersion: 1, operation: 'parse', entryFile, includeDirs: dirs.map(value => relativePath(value, true)), defines }
+  const dependencies = parseDependencies(input.dependencies ?? [])
+  const request: AnalysisRequest = { schemaVersion: 1, operation: 'parse', entryFile, includeDirs: dirs.map(value => relativePath(value, true)), defines, dependencies }
   if (input.source !== undefined) {
     if (typeof input.source !== 'string' || Buffer.byteLength(input.source) > 1024 * 1024) {
       throw new Error('source must be a string of at most 1 MiB')
@@ -67,6 +69,15 @@ export function parseRequest(value: unknown): AnalysisRequest {
     request.projectDir = input.projectDir
   }
   return request
+}
+
+/** Debian package names only; reject options, paths, and apt's trailing +/- actions. */
+export function parseDependencies(value: unknown): string[] {
+  if (!Array.isArray(value) || value.length > 64 || value.some(name =>
+    typeof name !== 'string' || name.length > 128 || !/^[a-z0-9][a-z0-9+.-]*[a-z0-9]$/.test(name))) {
+    throw new Error('dependencies must contain at most 64 Debian package names, without options or trailing +/-')
+  }
+  return [...new Set(value as string[])]
 }
 
 export function parseResult(value: unknown, jobId: string): WorkerResult {

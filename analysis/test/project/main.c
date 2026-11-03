@@ -1,6 +1,7 @@
 #include <stdio.h>
+#include <zlib.h>
 
 int main(void) {
-    printf("Hello from Lexeme!\n");
+    puts(ZLIB_VERSION);
     return 0;
 }

@@ -1,10 +1,18 @@
 import { fileURLToPath } from 'node:url'
+import { readFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 export const analysisRoot = fileURLToPath(new URL('../', import.meta.url))
-// Prepared worker image; override with LEXEME_ANALYSIS_IMAGE when needed.
-export const defaultImage = 'ghcr.io/mmaa304603/analysiscontainer:v1'
 export type Notify = (stage: string, message: string) => void
 
-export function selectedImage(image?: string): string {
-  return image ?? process.env.LEXEME_ANALYSIS_IMAGE ?? defaultImage
+export async function selectedImage(image?: string): Promise<string> {
+  let selected: unknown = image ?? process.env.LEXEME_ANALYSIS_IMAGE
+  if (selected === undefined) {
+    const config = JSON.parse(await readFile(join(analysisRoot, 'runtime.config.json'), 'utf8'))
+    selected = config?.image
+  }
+  if (typeof selected !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9._:/@-]*\/[a-zA-Z0-9._:/@-]+$/.test(selected)) {
+    throw new Error('Configure a fully qualified registry image in analysis/runtime.config.json')
+  }
+  return selected
 }

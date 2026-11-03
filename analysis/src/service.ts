@@ -7,6 +7,7 @@ import type { AnalysisRequest, JobSnapshot } from './contracts.js'
 import { analysisRoot } from './config.js'
 import { PodmanRuntime } from './environment.js'
 import { stageRequest } from './staging.js'
+import { installPackages } from './packages.js'
 
 interface Job { snapshot: JobSnapshot; controller: AbortController; done: Promise<void>; finished: boolean }
 export interface ServiceOptions {
@@ -56,8 +57,10 @@ export class AnalysisService {
       this.containerMayExist = true
       notify('starting-container', this.containerName)
       assertSuccess(await this.environment.command('podman', [
-        'run', '--detach', '--name', this.containerName, '--pull=never', '--network=none',
-        '--userns=keep-id', '--cap-drop=all', '--security-opt=no-new-privileges',
+        // ensureReady pulled the registry image. Default networking and capabilities
+        // allow apt to download packages and set ownership inside this rootless container.
+        'run', '--detach', '--name', this.containerName, '--pull=never',
+        '--userns=keep-id', '--security-opt=no-new-privileges',
         '--memory=512m', '--pids-limit=128', '--volume', `${this.jobsRoot}:/jobs:Z`, image, '--serve',
       ]), 'Persistent container startup')
       if (this.closed) throw new Error('Application shut down during analysis startup')
@@ -72,7 +75,7 @@ export class AnalysisService {
     }
   }
 
-  /** Accepts the backend JSON object described in examples/parse-request.json. */
+  /** Accepts a backend request with source/projectDir and optional Debian dependencies. */
   submit(value: unknown): JobSnapshot {
     if (this.closed) throw new Error('Analysis service is shutting down')
     if (!this.startup) throw new Error('Call analysis.start() at application startup before submitting requests')
@@ -104,7 +107,7 @@ export class AnalysisService {
     if (!job) return false
     if (['queued', 'preparing', 'running'].includes(job.snapshot.status)) {
       job.controller.abort()
-      this.event(job, 'cancelling', 'Cancellation requested for this job; the session container remains running')
+      this.event(job, 'cancelling', 'Cancellation requested for this job')
     }
     return true
   }
@@ -159,6 +162,19 @@ export class AnalysisService {
       if (this.runtimeFailure) throw new Error(this.runtimeFailure)
       this.event(job, 'staging', 'Writing the backend request into this job directory')
       await stageRequest(request, job.snapshot.id, jobDir, signal, dirname(this.jobsRoot))
+      signal.throwIfAborted()
+      if (request.dependencies.length > 0) {
+        try {
+          await installPackages(this.environment.command, this.containerName, request.dependencies, signal,
+            (stage, message) => this.event(job, stage, message))
+        } catch (error) {
+          // A failed or interrupted apt transaction can leave dpkg locked or partially
+          // configured. Retire the session before any queued compiler job can run.
+          this.runtimeFailure = 'Dependency installation failed or was interrupted; restart the analysis service'
+          await this.removeContainer()
+          throw error
+        }
+      }
       signal.throwIfAborted()
       signal.addEventListener('abort', requestCancellation, { once: true })
       job.snapshot.status = 'running'
@@ -215,7 +231,7 @@ export class AnalysisService {
         try { await appendFile(join(jobDir, 'worker.log'), log) }
         catch (error) { this.event(job, 'log-error', String(error)) }
       }
-      this.event(job, job.snapshot.status, job.snapshot.error ?? 'Job finished; session container remains available')
+      this.event(job, job.snapshot.status, job.snapshot.error ?? 'Job finished')
       job.finished = true
     }
   }

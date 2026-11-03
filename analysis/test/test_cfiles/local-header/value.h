@@ -1,1 +1,0 @@
-#define VALUE 42

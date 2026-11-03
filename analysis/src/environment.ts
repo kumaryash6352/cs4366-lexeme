@@ -9,7 +9,7 @@ export interface RuntimeOptions {
   platform?: NodeJS.Platform
 }
 
-/** Readiness checks only. Application startup never installs, builds, or pulls. */
+/** Check local rootless Podman, then pull the configured registry image. */
 export class PodmanRuntime {
   readonly command: Command
   private options: RuntimeOptions
@@ -22,7 +22,7 @@ export class PodmanRuntime {
     if ((this.options.platform ?? process.platform) !== 'linux') {
       throw new Error('Run the backend on Linux with local rootless Podman.')
     }
-    notify('checking-podman', 'Checking the prepared Podman environment')
+    notify('checking-podman', 'Checking the Podman environment')
     try {
       assertSuccess(await this.command('podman', ['--version']), 'Podman executable check')
     } catch (error) {
@@ -37,13 +37,9 @@ export class PodmanRuntime {
     if (runtime.host?.serviceIsRemote || runtime.host?.security?.rootless !== true) {
       throw new Error('Use local rootless Podman as your normal user for this prototype')
     }
-    const image = selectedImage(this.options.image)
-    notify('checking-image', image)
-    const exists = await this.command('podman', ['image', 'exists', image])
-    if (exists.code === 1) {
-      throw new Error(`Analysis image ${image} is not available locally. Load the prepared image with podman load or pull it from its registry, and set LEXEME_ANALYSIS_IMAGE to its tag; see analysis/README.md.`)
-    }
-    assertSuccess(exists, 'Image lookup')
+    const image = await selectedImage(this.options.image)
+    notify('pulling-image', image)
+    assertSuccess(await this.command('podman', ['pull', image], { timeoutMs: 300_000 }), `Pulling analysis image ${image}`)
     return image
   }
 
