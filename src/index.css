@@ -8,6 +8,14 @@
   -moz-osx-font-smoothing: grayscale;
   color-scheme: dark;
 }
+.noselect {
+   -webkit-user-select: none;
+   -moz-user-select: none;
+   -ms-user-select: none;
+   user-select: none;
+   pointer-events: none;
+}
+
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 640px; }
 button, textarea { font: inherit; }
