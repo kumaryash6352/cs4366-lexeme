@@ -1,9 +1,8 @@
 import { fileURLToPath } from 'node:url'
 
 export const analysisRoot = fileURLToPath(new URL('../', import.meta.url))
-// Central image name; Podman uses the implicit latest tag.
-export const defaultImage = 'localhost/podmananalysiscontainer'
-export const setupInstruction = 'Run the one-time setup: node analysis/dist/setup.js'
+// Prepared worker image; override with LEXEME_ANALYSIS_IMAGE when needed.
+export const defaultImage = 'ghcr.io/mmaa304603/analysiscontainer:v1'
 export type Notify = (stage: string, message: string) => void
 
 export function selectedImage(image?: string): string {

@@ -1,4 +1,4 @@
-// Public API for the future backend. Initial setup is a separate CLI/module.
+// Backend API for running jobs with an externally prepared worker image.
 export { AnalysisService } from './service.js'
 export type { ServiceOptions } from './service.js'
 export { parseRequest } from './contracts.js'

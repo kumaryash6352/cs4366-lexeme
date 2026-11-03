@@ -4,7 +4,6 @@ import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AnalysisService } from '../dist/index.js'
-import { AnalysisSetup } from '../dist/prepare.js'
 import { PodmanRuntime } from '../dist/environment.js'
 import { parseRequest, parseResult } from '../dist/contracts.js'
 
@@ -20,7 +19,6 @@ function fakePodman(overrides = {}) {
       if (result !== undefined) return result
     }
     if (args[0] === 'info') return ok(runtimeInfo)
-    if (args[0] === 'image' && args[1] === 'inspect') return ok('a'.repeat(64))
     if (args[0] === 'image') return { code: 1, stdout: '', stderr: '' }
     return ok()
   }
@@ -37,66 +35,6 @@ test('request boundary rejects traversal and ambiguous input; result must belong
   assert.equal(parseRequest(request({ source: 'int main(void) { return 0; }' })).entryFile, 'main.c')
 })
 
-test('simultaneous setup requests share one image build', async () => {
-  const fake = fakePodman()
-  const environment = new AnalysisSetup({ command: fake.command, platform: 'linux' })
-  const images = await Promise.all([environment.prepare(), environment.prepare()])
-  assert.equal(images[0], images[1])
-  assert.equal(fake.calls.filter(call => call[1] === 'build').length, 1)
-  assert.equal(fake.calls.filter(call => call[1] === '--version').length, 1)
-})
-
-test('build explicitly uses the effective cgroup manager, including the sessionless fallback', async () => {
-  for (const manager of ['cgroupfs', 'systemd']) {
-    const fake = fakePodman({ command: async (_program, args) => {
-      if (args[0] === 'info') {
-        const info = JSON.parse(runtimeInfo)
-        info.host.cgroupManager = manager
-        return ok(JSON.stringify(info))
-      }
-      // Model old Buildah ignoring Podman's implicit cgroupfs fallback.
-      if (args.includes('build') && args[0] !== `--cgroup-manager=${manager}`) {
-        return { code: 125, stdout: '', stderr: 'sd-bus call: Input/output error' }
-      }
-    } })
-    await new AnalysisSetup({ command: fake.command, platform: 'linux' }).prepare()
-    const build = fake.calls.find(call => call.includes('build'))
-    assert.deepEqual(build.slice(0, 3), ['podman', `--cgroup-manager=${manager}`, 'build'])
-    assert.ok(fake.calls.some(call => call.includes('--self-check')))
-
-    fake.calls.length = 0
-    const image = 'registry.example.com/team/analysis:latest'
-    await new AnalysisSetup({ command: fake.command, platform: 'linux', image }).prepare()
-    assert.ok(!fake.calls.some(call => call.includes('build')))
-    assert.deepEqual(fake.calls.find(call => call.includes('pull')), ['podman', 'pull', image])
-  }
-})
-
-test('missing executable triggers Ubuntu installation, but failed runtime checks never reinstall', async () => {
-  let installed = false
-  const fake = fakePodman({ command: async (program, args) => {
-    if (program === 'podman' && args[0] === '--version' && !installed) throw Object.assign(new Error('missing'), { code: 'ENOENT' })
-    if (program === 'sudo' && args.includes('install')) installed = true
-  } })
-  await new AnalysisSetup({ command: fake.command, platform: 'linux', readOsRelease: async () => 'ID=ubuntu\n' }).prepare()
-  assert.ok(installed)
-  const broken = fakePodman({ command: async (_program, args) => args[0] === 'info' ? { code: 125, stdout: '', stderr: 'runtime broken' } : undefined })
-  await assert.rejects(new AnalysisSetup({ command: broken.command, platform: 'linux' }).prepare(), /runtime broken/)
-  assert.ok(!broken.calls.some(call => call[0] === 'sudo'))
-})
-
-test('installation requires noninteractive authorization and image storage errors do not trigger builds', async () => {
-  const fake = fakePodman({ command: async (program, args) => {
-    if (program === 'podman' && args[0] === '--version') throw Object.assign(new Error('missing'), { code: 'ENOENT' })
-    if (program === 'sudo') return { code: 1, stdout: '', stderr: 'password required' }
-  } })
-  await assert.rejects(new AnalysisSetup({ command: fake.command, platform: 'linux', readOsRelease: async () => 'ID=ubuntu' }).prepare(), /sudo apt-get/)
-  assert.ok(!fake.calls.some(call => call.includes('apt-get')))
-  const broken = fakePodman({ command: async (_program, args) => args[0] === 'image' ? { code: 125, stdout: '', stderr: 'storage broken' } : undefined })
-  await assert.rejects(new AnalysisSetup({ command: broken.command, platform: 'linux' }).prepare(), /storage broken/)
-  assert.ok(!broken.calls.some(call => call[1] === 'build'))
-})
-
 test('normal startup only checks the prepared image and never installs, builds, or pulls', async () => {
   const fake = fakePodman({ command: async (_program, args) => args[0] === 'image' && args[1] === 'exists' ? ok() : undefined })
   const runtime = new PodmanRuntime({ command: fake.command, platform: 'linux', image: 'localhost/podmananalysiscontainer' })
@@ -104,26 +42,36 @@ test('normal startup only checks the prepared image and never installs, builds, 
   assert.deepEqual(fake.calls.map(call => call[1]), ['--version', 'info', 'image'])
 })
 
-test('missing image or executable requires initial setup without changing the host', async () => {
+test('missing image or executable reports external preparation instructions without changing the host', async () => {
   const missingImage = fakePodman()
-  await assert.rejects(new PodmanRuntime({ command: missingImage.command, platform: 'linux' }).ensureReady(), /one-time setup/)
+  await assert.rejects(new PodmanRuntime({ command: missingImage.command, platform: 'linux', image: 'localhost/test-worker' }).ensureReady(), /localhost\/test-worker.*podman load/)
   assert.ok(!missingImage.calls.some(call => ['build', 'pull', 'run'].includes(call[1])))
   const missingPodman = fakePodman({ command: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }) } })
-  await assert.rejects(new PodmanRuntime({ command: missingPodman.command, platform: 'linux' }).ensureReady(), /one-time setup/)
+  await assert.rejects(new PodmanRuntime({ command: missingPodman.command, platform: 'linux' }).ensureReady(), /Install Podman on the backend host/)
   assert.equal(missingPodman.calls.length, 1)
   assert.equal(missingPodman.calls[0][0], 'podman')
 })
 
-test('every setup invocation prepares and verifies the image even when it exists', async () => {
-  const fake = fakePodman({ command: async (_program, args) => args[0] === 'image' && args[1] === 'exists' ? ok() : undefined })
-  const setup = new AnalysisSetup({ command: fake.command, platform: 'linux' })
-  await setup.prepare()
-  await setup.prepare()
-  assert.equal(fake.calls.filter(call => call[1] === 'build').length, 2)
-  assert.equal(fake.calls.filter(call => call.includes('--self-check')).length, 2)
-  const custom = new AnalysisSetup({ command: fake.command, platform: 'linux', image: 'registry.example.com/analysis' })
-  await custom.prepare()
-  assert.equal(fake.calls.filter(call => call[1] === 'pull').length, 1)
+test('unsupported hosts and nonlocal or rootful Podman fail before image lookup', async () => {
+  const unsupported = fakePodman()
+  await assert.rejects(new PodmanRuntime({ command: unsupported.command, platform: 'darwin' }).ensureReady(), /Linux/)
+  assert.equal(unsupported.calls.length, 0)
+  for (const host of [
+    { serviceIsRemote: true, security: { rootless: true } },
+    { serviceIsRemote: false, security: { rootless: false } },
+  ]) {
+    const fake = fakePodman({ command: async (_program, args) => args[0] === 'info' ? ok(JSON.stringify({ host })) : undefined })
+    await assert.rejects(new PodmanRuntime({ command: fake.command, platform: 'linux' }).ensureReady(), /local rootless Podman/)
+    assert.deepEqual(fake.calls.map(call => call[1]), ['--version', 'info'])
+  }
+})
+
+test('Podman failures preserve diagnostics without attempting image preparation', async () => {
+  for (const stage of ['info', 'image']) {
+    const fake = fakePodman({ command: async (_program, args) => args[0] === stage ? { code: 125, stdout: '', stderr: 'storage unavailable' } : undefined })
+    await assert.rejects(new PodmanRuntime({ command: fake.command, platform: 'linux' }).ensureReady(), /storage unavailable/)
+    assert.deepEqual(fake.calls.map(call => call[1]), stage === 'info' ? ['--version', 'info'] : ['--version', 'info', 'image'])
+  }
 })
 
 async function serviceFixture(t, behavior = {}) {
@@ -299,32 +247,4 @@ test('staging rejects symbolic links without executing a job', async t => {
   assert.equal(result.status, 'failed')
   assert.match(result.error, /symbolic links/)
   assert.equal(fixture.executions(), 0)
-})
-
-
-test('rebuild removes only the replaced image after verification; preserves it on failure or unchanged build', async () => {
-  for (const scenario of ['changed', 'unchanged', 'build-failed', 'check-failed', 'in-use']) {
-    let built = false
-    const oldId = 'a'.repeat(64)
-    const newId = 'b'.repeat(64)
-    const events = []
-    const fake = fakePodman({ command: async (_program, args) => {
-      if (args[0] === 'image' && args[1] === 'exists') return ok()
-      if (args[0] === 'image' && args[1] === 'inspect') return ok(built && scenario !== 'unchanged' ? newId : oldId)
-      if (args[0] === 'build') {
-        if (scenario === 'build-failed') return { ...ok(), code: 1, stderr: 'build failed' }
-        built = true
-      }
-      if (args.includes('--self-check') && scenario === 'check-failed') return { ...ok(), code: 1, stderr: 'check failed' }
-      if (args[0] === 'rmi' && scenario === 'in-use') return { ...ok(), code: 1, stderr: 'image is in use' }
-    } })
-    const setup = new AnalysisSetup({ command: fake.command, platform: 'linux' })
-    const preparation = setup.prepare((stage, message) => events.push([stage, message]))
-    if (scenario.endsWith('failed')) await assert.rejects(preparation)
-    else await preparation
-    const removals = fake.calls.filter(call => call[1] === 'rmi')
-    assert.deepEqual(removals, ['changed', 'in-use'].includes(scenario) ? [['podman', 'rmi', oldId]] : [])
-    if (removals.length) assert.ok(fake.calls.findIndex(call => call.includes('--self-check')) < fake.calls.findIndex(call => call[1] === 'rmi'))
-    assert.equal(events.some(([stage]) => stage === 'cleanup-pending'), scenario === 'in-use')
-  }
 })

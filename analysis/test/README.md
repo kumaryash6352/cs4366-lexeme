@@ -13,31 +13,25 @@ npx --no-install tsc -p analysis/tsconfig.json
 
 ## Component tests
 
-Check setup, input validation, job lifecycle, cancellation, and timeouts using mocks.
+Check prepared-image readiness, input validation, job lifecycle, cancellation, and
+timeouts using mocks.
 No Podman or sudo required.
 
 ```sh
 # Run all mocked tests
 node --test analysis/test/*.test.mjs
 
-# Or run each suite separately
-node --test analysis/test/installation.test.mjs
+# Or run the component suite directly
 node --test analysis/test/component.test.mjs
 ```
 
 ## Container smoke test
 
 Check actual GCC processing, valid/invalid C inputs, container reuse, cancellation,
-and cleanup. Requires Ubuntu and working rootless Podman.
+and cleanup. Requires Linux, working rootless Podman, and the configured image
+available locally. See [runtime details](../README.md#runtime).
 
 ```sh
-# Only needed if setup must install Podman
-sudo -v
-
-# Prepare image; repeat after Containerfile or worker changes
-node analysis/dist/setup.js
-
-# Run the end-to-end test
 node analysis/test/smoke.mjs
 ```
 
