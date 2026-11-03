@@ -1,0 +1,26 @@
+on line 64:
+```
+        '--memory=512m', '--pids-[...]oot}:/jobs:Z`, image, '--serve',
+```
+ comment: 'make memory configurable, same wiht pids'
+
+on line 40-42:
+```
+    if (!Number.isInteger(this.ti[...]1 || this.timeoutMs > 600_000) {
+      throw new Error('timeoutMs [...]n integer between 1 and 600000')
+    }
+```
+ comment: 'make configurable'
+
+on line 30:
+```
+  private containerMayExist = false
+```
+ comment: 'this needs a better name'
+
+on line 203:
+```
+              } catch { log = (log + line + '\n').slice(-65536) }
+```
+ comment: 'why 64k chars? that's too much to be useful to output to stderr, too little to meaningfully clog a log dir'
+

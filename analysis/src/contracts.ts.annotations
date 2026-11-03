@@ -1,0 +1,33 @@
+on line 49-50:
+```
+  const entryFile = relativePath(input.entryFile ?? 'main.c')
+  if (!entryFile.endsWith('.c')) [...]r('entryFile must be a .c file')
+```
+ comment: 'why?'
+
+on line 53-57:
+```
+  if (!Array.isArray(dirs) || dir[...]e an array of at most 32 paths')
+  if (!Array.isArray(defines) || [...]th > 32 || defines.some(value =>
+...
+    throw new Error('defines must[...] 32 NAME or NAME=value strings')
+  }
+```
+ comment: 'why 32?'
+
+on line 60-65:
+```
+  if (input.source !== undefined) {
+    if (typeof input.source !== '[...]h(input.source) > 1024 * 1024) {
+...
+    request.source = input.source
+  } else {
+```
+ comment: 'why?'
+
+on line 78:
+```
+    throw new Error('dependencies[...]ithout options or trailing +/-')
+```
+ comment: 'why?'
+
