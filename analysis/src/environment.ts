@@ -1,7 +1,7 @@
 import { assertSuccess, runCommand } from './command.js'
 import type { Command } from './command.js'
-import { selectedImage } from './config.js'
-import type { Notify } from './config.js'
+import { loadRuntimeConfig, selectedImage } from './config.js'
+import type { Notify, RuntimeConfig } from './config.js'
 
 export interface RuntimeOptions {
   command?: Command
@@ -18,7 +18,7 @@ export class PodmanRuntime {
     this.command = options.command ?? runCommand
   }
 
-  async ensureReady(notify: Notify = () => {}): Promise<string> {
+  async ensureReady(notify: Notify = () => {}, config: RuntimeConfig = loadRuntimeConfig()): Promise<string> {
     if ((this.options.platform ?? process.platform) !== 'linux') {
       throw new Error('Run the backend on Linux with local rootless Podman.')
     }
@@ -37,9 +37,9 @@ export class PodmanRuntime {
     if (runtime.host?.serviceIsRemote || runtime.host?.security?.rootless !== true) {
       throw new Error('Use local rootless Podman as your normal user for this prototype')
     }
-    const image = await selectedImage(this.options.image)
+    const image = selectedImage(this.options.image, config.image)
     notify('pulling-image', image)
-    assertSuccess(await this.command('podman', ['pull', image], { timeoutMs: 300_000 }), `Pulling analysis image ${image}`)
+    assertSuccess(await this.command('podman', ['pull', image], { timeoutMs: config.timeouts.imagePullMs }), `Pulling analysis image ${image}`)
     return image
   }
 

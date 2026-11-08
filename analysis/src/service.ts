@@ -1,78 +1,81 @@
 import { randomUUID } from 'node:crypto'
-import { appendFile, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { assertSuccess } from './command.js'
 import { parseRequest, parseResult } from './contracts.js'
 import type { AnalysisRequest, JobSnapshot } from './contracts.js'
-import { analysisRoot } from './config.js'
+import { analysisRoot, analysisTimeout, loadRuntimeConfig } from './config.js'
+import type { RuntimeConfig } from './config.js'
 import { PodmanRuntime } from './environment.js'
 import { stageRequest } from './staging.js'
 import { installPackages } from './packages.js'
+import { openWorkerLog } from './worker-log.js'
 
 interface Job { snapshot: JobSnapshot; controller: AbortController; done: Promise<void>; finished: boolean }
 export interface ServiceOptions {
   environment?: PodmanRuntime
   jobsRoot?: string
   timeoutMs?: number
+  configPath?: string
 }
 
-/** One application session owns one persistent container and a serial job queue. */
+/** One application session owns a serial queue; each job gets a fresh container. */
 export class AnalysisService {
   readonly environment: PodmanRuntime
   readonly jobsRoot: string
-  readonly containerName: string
   private jobs = new Map<string, Job>()
   private queue: Promise<void> = Promise.resolve()
   private startup: Promise<void> | undefined
   private shutdownPromise: Promise<void> | undefined
   private timeoutMs: number
+  private config: RuntimeConfig
   private closed = false
-  private containerMayExist = false
+  private image: string | undefined
+  private containers = new Set<string>()
   private runtimeFailure: string | undefined
 
   constructor(options: ServiceOptions = {}) {
+    this.config = loadRuntimeConfig(options.configPath)
     this.environment = options.environment ?? new PodmanRuntime()
     const sessionId = randomUUID()
-    this.containerName = `lexeme-session-${sessionId}`
     this.jobsRoot = resolve(options.jobsRoot ?? join(analysisRoot, '.jobs'), sessionId)
     if (/[:,\n\r]/.test(this.jobsRoot)) throw new Error('jobsRoot cannot contain colon, comma, or newline characters')
-    this.timeoutMs = options.timeoutMs ?? 60_000
-    if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > 600_000) {
-      throw new Error('timeoutMs must be an integer between 1 and 600000')
-    }
+    this.timeoutMs = analysisTimeout(options.timeoutMs ?? this.config.timeouts.analysisMs)
   }
 
   /** Call once at application startup, before accepting parsing requests. */
   start(notify: (stage: string, message: string) => void = () => {}): Promise<void> {
     if (this.closed) return Promise.reject(new Error('Analysis service is shutting down'))
-    this.startup ??= this.startContainer(notify)
+    this.startup ??= this.prepare(notify)
     return this.startup
   }
 
-  private async startContainer(notify: (stage: string, message: string) => void): Promise<void> {
-    try {
-      const image = await this.environment.ensureReady(notify)
-      if (this.closed) throw new Error('Application shut down during analysis startup')
-      await mkdir(this.jobsRoot, { recursive: true })
-      this.containerMayExist = true
-      notify('starting-container', this.containerName)
-      assertSuccess(await this.environment.command('podman', [
-        // ensureReady pulled the registry image. Default networking and capabilities
-        // allow apt to download packages and set ownership inside this rootless container.
-        'run', '--detach', '--name', this.containerName, '--pull=never',
-        '--userns=keep-id', '--security-opt=no-new-privileges',
-        '--memory=512m', '--pids-limit=128', '--volume', `${this.jobsRoot}:/jobs:Z`, image, '--serve',
-      ]), 'Persistent container startup')
-      if (this.closed) throw new Error('Application shut down during analysis startup')
-      notify('verifying-worker', 'Checking the worker in the persistent container')
-      assertSuccess(await this.environment.command('podman', [
-        'exec', this.containerName, 'node', '/app/worker/main.mjs', '--self-check',
-      ]), 'Worker self-check')
-      notify('ready', this.containerName)
-    } catch (error) {
-      if (this.containerMayExist) await this.removeContainer()
-      throw error
-    }
+  private async prepare(notify: (stage: string, message: string) => void): Promise<void> {
+    this.image = await this.environment.ensureReady(notify, this.config)
+    if (this.closed) throw new Error('Application shut down during analysis startup')
+    await mkdir(this.jobsRoot, { recursive: true })
+    notify('ready', this.image)
+  }
+
+  private async startContainer(containerName: string, jobDir: string, job: Job): Promise<void> {
+    const { signal } = job.controller
+    signal.throwIfAborted()
+    // Track before run: Podman can create a container even if the command fails.
+    this.containers.add(containerName)
+    this.event(job, 'starting-container', containerName)
+    assertSuccess(await this.environment.command('podman', [
+      // Each run starts from the pulled base image, with only this job mounted.
+      'run', '--detach', '--name', containerName, '--pull=never',
+      '--userns=keep-id', '--security-opt=no-new-privileges',
+      `--memory=${this.config.container.memory}`, `--pids-limit=${this.config.container.pidsLimit}`,
+      '--volume', `${jobDir}:/jobs/${job.snapshot.id}:Z`, this.image!, '--serve',
+    ]), 'Job container startup')
+    signal.throwIfAborted()
+    this.event(job, 'verifying-worker', 'Checking the worker in the job container')
+    assertSuccess(await this.environment.command('podman', [
+      'exec', containerName, 'node', '/app/worker/main.mjs', '--self-check',
+    ]), 'Worker self-check')
+    signal.throwIfAborted()
   }
 
   /** Accepts a backend request with source/projectDir and optional Debian dependencies. */
@@ -80,8 +83,10 @@ export class AnalysisService {
     if (this.closed) throw new Error('Analysis service is shutting down')
     if (!this.startup) throw new Error('Call analysis.start() at application startup before submitting requests')
     if (this.runtimeFailure) throw new Error(this.runtimeFailure)
-    const request = parseRequest(value)
-    if (this.jobs.size >= 100) throw new Error('Prototype session limit reached (100 jobs); start a new application session')
+    const request = parseRequest(value, this.config.limits)
+    if (this.jobs.size >= this.config.limits.jobsPerSession) {
+      throw new Error(`Session limit reached (${this.config.limits.jobsPerSession} jobs); start a new application session`)
+    }
     const id = randomUUID()
     const job: Job = { snapshot: { id, status: 'queued', events: [] }, controller: new AbortController(), done: Promise.resolve(), finished: false }
     this.jobs.set(id, job)
@@ -98,8 +103,12 @@ export class AnalysisService {
     return snapshot
   }
 
-  artifactPath(id: string): string | undefined {
-    return this.get(id)?.status === 'succeeded' ? join(this.jobsRoot, id, 'output', 'main.i') : undefined
+  artifactPath(id: string, path?: string): string | undefined {
+    const snapshot = this.get(id)
+    if (snapshot?.status !== 'succeeded') return undefined
+    const artifact = path === undefined ? snapshot.result?.artifacts[0]
+      : snapshot.result?.artifacts.find(artifact => artifact.path === path)
+    return artifact ? join(this.jobsRoot, id, 'output', artifact.path) : undefined
   }
 
   cancel(id: string): boolean {
@@ -129,12 +138,13 @@ export class AnalysisService {
     for (const id of this.jobs.keys()) this.cancel(id)
     await this.startup?.catch(() => {})
     await this.queue
-    if (this.containerMayExist) await this.removeContainer()
+    // Retry any cleanup that failed at the end of a job.
+    for (const containerName of this.containers) await this.removeContainer(containerName)
   }
 
-  private async removeContainer(): Promise<void> {
-    assertSuccess(await this.environment.command('podman', ['rm', '--force', '--ignore', this.containerName]), 'Session container cleanup')
-    this.containerMayExist = false
+  private async removeContainer(containerName: string): Promise<void> {
+    assertSuccess(await this.environment.command('podman', ['rm', '--force', '--ignore', containerName]), 'Job container cleanup')
+    this.containers.delete(containerName)
   }
 
   private event(job: Job, stage: string, message: string): void {
@@ -145,9 +155,10 @@ export class AnalysisService {
   private async execute(job: Job, request: AnalysisRequest): Promise<void> {
     const { signal } = job.controller
     const jobDir = join(this.jobsRoot, job.snapshot.id)
+    const containerName = `lexeme-job-${job.snapshot.id}`
     let timedOut = false
     let timer: ReturnType<typeof setTimeout> | undefined
-    let log = ''
+    let log: Awaited<ReturnType<typeof openWorkerLog>> | undefined
     let cancellationWrite = Promise.resolve()
     const requestCancellation = () => {
       cancellationWrite = writeFile(join(jobDir, 'cancel'), 'cancel\n').catch(error => {
@@ -161,62 +172,57 @@ export class AnalysisService {
       signal.throwIfAborted()
       if (this.runtimeFailure) throw new Error(this.runtimeFailure)
       this.event(job, 'staging', 'Writing the backend request into this job directory')
-      await stageRequest(request, job.snapshot.id, jobDir, signal, dirname(this.jobsRoot))
+      await stageRequest(request, job.snapshot.id, jobDir, signal, this.config.limits, dirname(this.jobsRoot))
       signal.throwIfAborted()
+      await this.startContainer(containerName, jobDir, job)
       if (request.dependencies.length > 0) {
-        try {
-          await installPackages(this.environment.command, this.containerName, request.dependencies, signal,
-            (stage, message) => this.event(job, stage, message))
-        } catch (error) {
-          // A failed or interrupted apt transaction can leave dpkg locked or partially
-          // configured. Retire the session before any queued compiler job can run.
-          this.runtimeFailure = 'Dependency installation failed or was interrupted; restart the analysis service'
-          await this.removeContainer()
-          throw error
-        }
+        await installPackages(this.environment.command, containerName, request.dependencies, signal, this.config.timeouts.packageCommandMs,
+          (stage, message) => this.event(job, stage, message))
       }
       signal.throwIfAborted()
       signal.addEventListener('abort', requestCancellation, { once: true })
       job.snapshot.status = 'running'
       timer = setTimeout(() => { timedOut = true; job.controller.abort() }, this.timeoutMs)
+      log = await openWorkerLog(join(jobDir, 'worker.log'), this.config.limits.workerLogBytes)
       let pending = ''
-      let run
-      try {
-        run = await this.environment.command('podman', [
-          'exec', this.containerName, 'node', '/app/worker/main.mjs',
-          '--job', job.snapshot.id, '--timeout-ms', String(this.timeoutMs),
-        ], {
-          // The worker observes cancellation and kills its compiler process group.
-          // Killing only the host exec client could leave the compiler running.
-          timeoutMs: this.timeoutMs + 10_000,
-          onStderr: text => { log = (log + text).slice(-65536) },
-          onStdout: text => {
-            pending += text
-            if (pending.length > 65536) { pending = ''; return }
-            let end: number
-            while ((end = pending.indexOf('\n')) >= 0) {
-              const line = pending.slice(0, end)
-              pending = pending.slice(end + 1)
-              try {
-                const event = JSON.parse(line)
-                if (event.type === 'progress' && typeof event.stage === 'string') this.event(job, event.stage, event.stage)
-              } catch { log = (log + line + '\n').slice(-65536) }
+      let oversizedLine = false
+      const run = await this.environment.command('podman', [
+        'exec', containerName, 'node', '/app/worker/main.mjs',
+        '--job', job.snapshot.id, '--timeout-ms', String(this.timeoutMs),
+      ], {
+        // The worker observes cancellation and kills its compiler process group.
+        // Killing only the host exec client could leave the compiler running.
+        timeoutMs: this.timeoutMs + 10_000,
+        tailBytes: this.config.limits.errorTailBytes,
+        onStderr: text => log!.write(text),
+        onStdout: async text => {
+          await log!.write(text)
+          // Progress messages are tiny. Oversized lines are logged but not parsed.
+          const parts = text.split('\n')
+          for (let index = 0; index < parts.length; index++) {
+            if (!oversizedLine) {
+              pending += parts[index]
+              if (pending.length > 4096) { pending = ''; oversizedLine = true }
             }
-          },
-        })
-      } catch (error) {
-        // Retire an unresponsive session so a surviving child cannot overlap the next job.
-        this.runtimeFailure = 'Worker connection failed; restart the analysis service before submitting more requests'
-        await this.removeContainer()
-        throw error
-      }
+            if (index === parts.length - 1) break
+            try {
+              const event = JSON.parse(pending)
+              if (event.type === 'progress' && typeof event.stage === 'string') this.event(job, event.stage, event.stage)
+            } catch { /* Non-progress output is already in worker.log. */ }
+            pending = ''
+            oversizedLine = false
+          }
+        },
+      })
       signal.throwIfAborted()
       const resultPath = join(jobDir, 'output', 'result.json')
       if ((await stat(resultPath)).size > 1024 * 1024) throw new Error('Worker result exceeds 1 MiB')
       const result = parseResult(JSON.parse(await readFile(resultPath, 'utf8')), job.snapshot.id)
       if (result.status === 'succeeded') {
         assertSuccess(run, 'Worker process')
-        if (!(await stat(join(jobDir, 'output', 'main.i'))).isFile()) throw new Error('Worker omitted main.i')
+        for (const artifact of result.artifacts) {
+          if (!(await stat(join(jobDir, 'output', artifact.path))).isFile()) throw new Error(`Worker omitted ${artifact.path}`)
+        }
       } else if (run.code === 0) throw new Error('Worker reported failure but exited successfully')
       job.snapshot.result = result
       job.snapshot.status = result.status
@@ -227,8 +233,21 @@ export class AnalysisService {
       if (timer) clearTimeout(timer)
       signal.removeEventListener('abort', requestCancellation)
       await cancellationWrite
+      if (this.containers.has(containerName)) {
+        try {
+          await this.removeContainer(containerName)
+          this.event(job, 'container-removed', containerName)
+        } catch (error) {
+          // Do not start another job while processes from this one may still exist.
+          this.runtimeFailure = 'Job container cleanup failed; shut down and restart the analysis service'
+          job.snapshot.status = 'failed'
+          const message = error instanceof Error ? error.message : String(error)
+          job.snapshot.error = [job.snapshot.error, message].filter(Boolean).join('; ')
+          this.event(job, 'cleanup-error', message)
+        }
+      }
       if (log) {
-        try { await appendFile(join(jobDir, 'worker.log'), log) }
+        try { await log.close() }
         catch (error) { this.event(job, 'log-error', String(error)) }
       }
       this.event(job, job.snapshot.status, job.snapshot.error ?? 'Job finished')

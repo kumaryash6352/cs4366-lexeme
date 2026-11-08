@@ -1,46 +1,35 @@
 # Analysis tests
 
-Run from the repository root.
-
-## Prepare
-
-Install dependencies and compile the analysis code. Recompile after TypeScript changes.
+Run from the repository root. Recompile after TypeScript changes.
 
 ```sh
-npm ci
 npx --no-install tsc -p analysis/tsconfig.json
-```
-
-## Component tests
-
-Check prepared-image readiness, input validation, job lifecycle, cancellation, and
-timeouts using mocks.
-No Podman or sudo required.
-
-```sh
-# Run all mocked tests
 node --test analysis/test/*.test.mjs
-
-# Or run the component suite directly
-node --test analysis/test/component.test.mjs
-```
-
-## Container smoke test
-
-Check actual GCC processing, valid/invalid C inputs, container reuse, cancellation,
-and cleanup. Requires Linux, working rootless Podman, and the configured image
-available locally. See [runtime details](../README.md#runtime).
-
-```sh
-node analysis/test/smoke.mjs
-```
-
-Inputs: `test_cfiles/` and `parse-request.json`. Job outputs remain in `analysis/.jobs/`.
-Invalid C samples are expected to fail; the overall test should exit with code 0.
-
-## Type and lint checks
-
-```sh
-npx --no-install tsc -p analysis/tsconfig.json --noEmit
 npx --no-install oxlint -c .oxlintrc.json analysis/src analysis/worker analysis/test
 ```
+
+`component.test.mjs` covers request/configuration validation and the container
+lifecycle using mocked Podman calls. `logging.test.mjs` checks streaming,
+truncation, diagnostic tails, and asynchronous output handling.
+
+`worker.test.mjs` runs the actual worker locally. GCC tests require GCC; CMake
+tests require CMake, Make, GCC, and Python 3 on PATH. Tests skip when their main
+tools are unavailable. They cover custom source filenames, more than 32 flags,
+multiple CMake compilation commands, quoted paths/macros, and configuration
+failures. These tests use temporary directories and do not need Podman.
+
+For an end-to-end container run, use Linux with working rootless Podman and a
+published image containing the current worker. Set the image in
+`analysis/runtime.config.json` first.
+
+```sh
+# Bundled CMake project; installs zlib1g-dev in the job container
+node analysis/test/backend-call.mjs
+
+# Another CMake project, optionally followed by Debian packages
+node analysis/test/backend-call.mjs ~/cJSON
+node analysis/test/backend-call.mjs /path/to/project zlib1g-dev libssl-dev
+```
+
+The script prints the job result and every artifact path. Outputs remain in
+`analysis/.jobs/`. See [runtime details](../README.md#runtime).

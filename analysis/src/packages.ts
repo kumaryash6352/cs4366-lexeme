@@ -7,12 +7,12 @@ import { parseDependencies } from './contracts.js'
  * The caller must remove the container on failure/abort: stopping podman exec alone
  * does not guarantee the package manager inside it has stopped.
  */
-export async function installPackages(command: Command, container: string, dependencies: string[], signal: AbortSignal, notify: Notify = () => {}): Promise<void> {
+export async function installPackages(command: Command, container: string, dependencies: string[], signal: AbortSignal, timeoutMs: number, notify: Notify = () => {}): Promise<void> {
   const packages = parseDependencies(dependencies)
   signal.throwIfAborted()
   if (packages.length === 0) return
   const exec = ['exec', '--user', '0:0', '--env', 'DEBIAN_FRONTEND=noninteractive', container, 'apt-get']
-  const options = { signal, timeoutMs: 300_000 }
+  const options = { signal, timeoutMs }
   notify('updating-packages', 'Refreshing Debian package indexes')
   assertSuccess(await command('podman', [...exec, 'update', '--error-on=any'], options), 'Package index update')
   signal.throwIfAborted()

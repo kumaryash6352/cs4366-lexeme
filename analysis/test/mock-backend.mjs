@@ -5,16 +5,13 @@ import { resolve } from 'node:path'
 // projectDir must be accessible on the host running AnalysisService.
 export async function getAnalysisRequest(project = {
   projectDir: fileURLToPath(new URL('./project/', import.meta.url)),
-  entryFile: 'main.c',
   dependencies: ['zlib1g-dev'],
 }) {
   return {
     schemaVersion: 1,
     operation: 'parse',
     projectDir: resolve(project.projectDir),
-    entryFile: project.entryFile ?? 'main.c',
+    ...(project.entryFile === undefined ? {} : { entryFile: project.entryFile }),
     dependencies: project.dependencies ?? [],
-    includeDirs: ['.'],
-    defines: [],
   }
 }

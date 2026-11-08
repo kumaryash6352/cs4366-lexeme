@@ -1,9 +1,12 @@
+import { loadRuntimeConfig } from './config.js'
+import type { RuntimeConfig } from './config.js'
+
 export interface AnalysisRequest {
   schemaVersion: 1
   operation: 'parse'
   source?: string
   projectDir?: string
-  entryFile: string
+  entryFile?: string
   includeDirs: string[]
   defines: string[]
   dependencies: string[]
@@ -13,7 +16,7 @@ export interface WorkerResult {
   schemaVersion: 1
   jobId: string
   status: 'succeeded' | 'failed'
-  artifacts: { kind: 'preprocessed-source'; path: 'main.i' }[]
+  artifacts: { kind: 'preprocessed-source'; path: string; source?: string }[]
   diagnostics: { stage: string; message: string }[]
 }
 
@@ -37,7 +40,7 @@ export function relativePath(value: unknown, allowDot = false): string {
   return value
 }
 
-export function parseRequest(value: unknown): AnalysisRequest {
+export function parseRequest(value: unknown, limits: RuntimeConfig['limits'] = loadRuntimeConfig().limits): AnalysisRequest {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Request must be an object')
   const input = value as Record<string, unknown>
   if (input.schemaVersion !== 1 || input.operation !== 'parse') {
@@ -46,20 +49,27 @@ export function parseRequest(value: unknown): AnalysisRequest {
   if ((input.source === undefined) === (input.projectDir === undefined)) {
     throw new Error('Provide exactly one of source or projectDir')
   }
-  const entryFile = relativePath(input.entryFile ?? 'main.c')
-  if (!entryFile.endsWith('.c')) throw new Error('entryFile must be a .c file')
+  const entryFile = input.entryFile !== undefined ? relativePath(input.entryFile)
+    : input.source !== undefined ? 'main.c' : undefined
+  if (entryFile !== undefined && !entryFile.endsWith('.c')) throw new Error('entryFile must be a .c file')
+  if (entryFile === undefined && (input.includeDirs !== undefined || input.defines !== undefined)) {
+    throw new Error('CMake projects obtain includeDirs and defines from CMakeLists.txt')
+  }
   const dirs = input.includeDirs ?? ['.']
   const defines = input.defines ?? []
-  if (!Array.isArray(dirs) || dirs.length > 32) throw new Error('includeDirs must be an array of at most 32 paths')
-  if (!Array.isArray(defines) || defines.length > 32 || defines.some(value =>
+  if (!Array.isArray(dirs) || dirs.length > limits.includeDirs) throw new Error(`includeDirs must be an array of at most ${limits.includeDirs} paths`)
+  if (!Array.isArray(defines) || defines.length > limits.defines || defines.some(value =>
     typeof value !== 'string' || value.length > 256 || !/^[A-Za-z_]\w*(=[^\r\n\0]*)?$/.test(value))) {
-    throw new Error('defines must contain at most 32 NAME or NAME=value strings')
+    throw new Error(`defines must contain at most ${limits.defines} NAME or NAME=value strings`)
   }
   const dependencies = parseDependencies(input.dependencies ?? [])
-  const request: AnalysisRequest = { schemaVersion: 1, operation: 'parse', entryFile, includeDirs: dirs.map(value => relativePath(value, true)), defines, dependencies }
+  if (dependencies.length > limits.maxRequestedDependencies) {
+    throw new Error(`dependencies must contain at most ${limits.maxRequestedDependencies} unique Debian package names`)
+  }
+  const request: AnalysisRequest = { schemaVersion: 1, operation: 'parse', ...(entryFile === undefined ? {} : { entryFile }), includeDirs: dirs.map(value => relativePath(value, true)), defines, dependencies }
   if (input.source !== undefined) {
-    if (typeof input.source !== 'string' || Buffer.byteLength(input.source) > 1024 * 1024) {
-      throw new Error('source must be a string of at most 1 MiB')
+    if (typeof input.source !== 'string' || Buffer.byteLength(input.source) > limits.sourceBytes) {
+      throw new Error(`source must be a string of at most ${limits.sourceBytes} bytes`)
     }
     request.source = input.source
   } else {
@@ -73,9 +83,9 @@ export function parseRequest(value: unknown): AnalysisRequest {
 
 /** Debian package names only; reject options, paths, and apt's trailing +/- actions. */
 export function parseDependencies(value: unknown): string[] {
-  if (!Array.isArray(value) || value.length > 64 || value.some(name =>
+  if (!Array.isArray(value) || value.some(name =>
     typeof name !== 'string' || name.length > 128 || !/^[a-z0-9][a-z0-9+.-]*[a-z0-9]$/.test(name))) {
-    throw new Error('dependencies must contain at most 64 Debian package names, without options or trailing +/-')
+    throw new Error('dependencies must contain Debian package names, without options or trailing +/-')
   }
   return [...new Set(value as string[])]
 }
@@ -89,7 +99,9 @@ export function parseResult(value: unknown, jobId: string): WorkerResult {
     throw new Error('Worker result does not match protocol version 1 or this job')
   }
   for (const artifact of result.artifacts) {
-    if (!artifact || artifact.kind !== 'preprocessed-source' || artifact.path !== 'main.i') {
+    if (!artifact || artifact.kind !== 'preprocessed-source' || typeof artifact.path !== 'string' ||
+        !/^(main|unit-[0-9]+)\.i$/.test(artifact.path) ||
+        (artifact.source !== undefined && typeof artifact.source !== 'string')) {
       throw new Error('Worker returned an unsupported artifact')
     }
   }
@@ -98,6 +110,6 @@ export function parseResult(value: unknown, jobId: string): WorkerResult {
       throw new Error('Worker returned invalid diagnostics')
     }
   }
-  if (result.status === 'succeeded' && result.artifacts.length !== 1) throw new Error('Successful result is missing main.i')
+  if (result.status === 'succeeded' && result.artifacts.length === 0) throw new Error('Successful result is missing preprocessed sources')
   return result as unknown as WorkerResult
 }

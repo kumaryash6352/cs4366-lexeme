@@ -3,8 +3,9 @@ import { spawn } from 'node:child_process'
 export interface CommandOptions {
   timeoutMs?: number
   signal?: AbortSignal
-  onStdout?: (text: string) => void
-  onStderr?: (text: string) => void
+  tailBytes?: number
+  onStdout?: (text: string) => void | Promise<void>
+  onStderr?: (text: string) => void | Promise<void>
 }
 export interface CommandResult { code: number; stdout: string; stderr: string }
 export type Command = (program: string, args: string[], options?: CommandOptions) => Promise<CommandResult>
@@ -13,8 +14,11 @@ export type Command = (program: string, args: string[], options?: CommandOptions
 export const runCommand: Command = (program, args, options = {}) => new Promise((resolve, reject) => {
   if (options.signal?.aborted) { reject(new Error('Operation cancelled')); return }
   const child = spawn(program, args, { shell: false, stdio: ['ignore', 'pipe', 'pipe'] })
-  let stdout = ''
-  let stderr = ''
+  let stdout = Buffer.alloc(0)
+  let stderr = Buffer.alloc(0)
+  // Preserve capture capacity for structured output such as `podman info` JSON.
+  // Worker jobs supply their smaller, configured diagnostic budget explicitly.
+  const tailBytes = options.tailBytes ?? 64 * 1024
   let interrupted = ''
   let killTimer: ReturnType<typeof setTimeout> | undefined
   const interrupt = (reason: string) => {
@@ -33,13 +37,29 @@ export const runCommand: Command = (program, args, options = {}) => new Promise(
   }
   child.stdout.setEncoding('utf8')
   child.stderr.setEncoding('utf8')
-  child.stdout.on('data', (text: string) => { stdout = (stdout + text).slice(-65536); options.onStdout?.(text) })
-  child.stderr.on('data', (text: string) => { stderr = (stderr + text).slice(-65536); options.onStderr?.(text) })
+  // Await consumers so a slow log file applies backpressure to the child pipes.
+  const consume = async (stream: typeof child.stdout, isStderr: boolean) => {
+    for await (const text of stream) {
+      const chunk = Buffer.from(text)
+      if (isStderr) {
+        stderr = Buffer.from(Buffer.concat([stderr, chunk]).subarray(-tailBytes))
+        await options.onStderr?.(String(text))
+      } else {
+        stdout = Buffer.from(Buffer.concat([stdout, chunk]).subarray(-tailBytes))
+        await options.onStdout?.(String(text))
+      }
+    }
+  }
+  const consumed = Promise.all([consume(child.stdout, false), consume(child.stderr, true)])
+  consumed.catch(() => interrupt('Output handling failed'))
   child.on('error', error => { cleanup(); reject(error) })
-  child.on('close', code => {
+  child.on('close', async code => {
     cleanup()
-    if (interrupted) reject(new Error(interrupted))
-    else resolve({ code: code ?? 1, stdout, stderr })
+    try {
+      await consumed
+      if (interrupted) reject(new Error(interrupted))
+      else resolve({ code: code ?? 1, stdout: stdout.toString('utf8'), stderr: stderr.toString('utf8') })
+    } catch (error) { reject(error) }
   })
 })
 

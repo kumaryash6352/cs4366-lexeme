@@ -1,22 +1,24 @@
 import { spawn } from 'node:child_process'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { join, resolve, sep } from 'node:path'
+import { join, relative, resolve, sep } from 'node:path'
 import { existsSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
 let control
+let errorTailBytes = 4096
 function interruption() {
   if (control && existsSync(control.cancelPath)) return 'Job cancelled'
   if (control && Date.now() >= control.deadline) return 'Job timed out'
   return ''
 }
 
-function execute(program, args) {
+function execute(program, args, cwd) {
   return new Promise((resolve, reject) => {
     const before = interruption()
     if (before) { reject(new Error(before)); return }
-    const child = spawn(program, args, { shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
-    let output = ''
-    let diagnostics = ''
+    const child = spawn(program, args, { cwd, shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    let output = Buffer.alloc(0)
+    let diagnostics = Buffer.alloc(0)
     let interrupted = ''
     let killTimer
     const killGroup = signal => {
@@ -32,22 +34,24 @@ function execute(program, args) {
       }
     }, 25)
     const cleanup = () => { clearInterval(monitor); if (killTimer) clearTimeout(killTimer) }
-    child.stdout.on('data', chunk => { output = (output + chunk.toString()).slice(-32768) })
+    child.stdout.on('data', chunk => { output = Buffer.from(Buffer.concat([output, chunk]).subarray(-errorTailBytes)) })
     child.stderr.on('data', chunk => {
-      diagnostics = (diagnostics + chunk.toString()).slice(-32768)
-      process.stderr.write(chunk)
+      diagnostics = Buffer.from(Buffer.concat([diagnostics, chunk]).subarray(-errorTailBytes))
     })
+    child.stdout.pipe(process.stderr, { end: false })
+    child.stderr.pipe(process.stderr, { end: false })
     child.on('error', error => { cleanup(); reject(error) })
     child.on('close', code => {
       cleanup()
       if (interrupted) reject(new Error(interrupted))
-      else resolve({ code: code ?? 1, output, diagnostics })
+      else resolve({ code: code ?? 1, output: output.toString('utf8'), diagnostics: diagnostics.toString('utf8') })
     })
   })
 }
 
 if (process.argv.includes('--serve')) {
-  // Keep the application container alive. Each request uses a separate exec process, while the container and its toolchain persist for the session.
+  // Keep this job's container alive for dependency installation and worker exec.
+  // AnalysisService removes the container when the job finishes.
   const heartbeat = setInterval(() => {}, 60_000)
   for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => clearInterval(heartbeat))
   console.log(JSON.stringify({ type: 'ready', schemaVersion: 1 }))
@@ -87,26 +91,55 @@ if (process.argv.includes('--serve')) {
       throw new Error('Unsupported request protocol')
     }
     jobId = request.jobId
-    const entry = projectPath(request.entryFile)
-    if (!entry.endsWith('.c')) throw new Error('Entry file must be C source')
-    if (!Array.isArray(request.includeDirs) || request.includeDirs.length > 32 || !Array.isArray(request.defines) || request.defines.length > 32) {
-      throw new Error('Invalid compiler settings')
+    if (!Number.isSafeInteger(request.errorTailBytes) || request.errorTailBytes < 1) throw new Error('Invalid diagnostic limit')
+    errorTailBytes = request.errorTailBytes
+    let commands
+    if (request.entryFile === undefined) {
+      progress('configuring-cmake')
+      const build = join(jobDir, 'work', 'build')
+      const configured = await execute('cmake', [
+        '-S', sourceRoot, '-B', build, '-G', 'Unix Makefiles',
+        '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON', '-DCMAKE_UNITY_BUILD=OFF',
+      ])
+      if (configured.code !== 0) throw new Error(configured.diagnostics || configured.output || 'CMake configuration failed')
+      const commandsPath = join(jobDir, 'work', 'commands.json')
+      const converted = await execute('python3', [
+        fileURLToPath(new URL('./compile_commands.py', import.meta.url)),
+        join(build, 'compile_commands.json'), commandsPath,
+      ])
+      if (converted.code !== 0) throw new Error(converted.diagnostics || 'Cannot read CMake compilation commands')
+      commands = JSON.parse(await readFile(commandsPath, 'utf8'))
+      if (commands.length === 0) throw new Error('CMake project has no C translation units')
+    } else {
+      const entry = projectPath(request.entryFile)
+      if (!entry.endsWith('.c')) throw new Error('Entry file must be C source')
+      if (!Array.isArray(request.includeDirs) || !Array.isArray(request.defines)) throw new Error('Invalid compiler settings')
+      const flags = ['-std=c11', ...request.includeDirs.flatMap(dir => ['-I', projectPath(dir)])]
+      for (const define of request.defines) {
+        if (typeof define !== 'string' || define.length > 256 || !/^[A-Za-z_]\w*(=[^\r\n\0]*)?$/.test(define)) throw new Error('Invalid macro definition')
+        flags.push(`-D${define}`)
+      }
+      commands = [{ args: ['gcc', ...flags, entry], directory: sourceRoot, file: entry }]
     }
-    const flags = ['-std=c11', ...request.includeDirs.flatMap(dir => ['-I', projectPath(dir)])]
-    for (const define of request.defines) {
-      if (typeof define !== 'string' || define.length > 256 || !/^[A-Za-z_]\w*(=[^\r\n\0]*)?$/.test(define)) throw new Error('Invalid macro definition')
-      flags.push(`-D${define}`)
+    const artifacts = []
+    const diagnostics = []
+    for (const [index, command] of commands.entries()) {
+      const [compiler, ...flags] = command.args
+      const path = request.entryFile === undefined ? `unit-${index + 1}.i` : 'main.i'
+      progress('checking-syntax')
+      const checked = await execute(compiler, [...flags, '-fsyntax-only'], command.directory)
+      if (checked.code !== 0) throw new Error(checked.diagnostics || checked.output || `Syntax check failed: ${command.file}`)
+      progress('preprocessing')
+      const preprocessed = await execute(compiler, [...flags, '-E', '-o', join(output, path)], command.directory)
+      if (preprocessed.code !== 0) throw new Error(preprocessed.diagnostics || preprocessed.output || `Preprocessing failed: ${command.file}`)
+      artifacts.push({ kind: 'preprocessed-source', path, source: relative(sourceRoot, command.file) })
+      for (const message of [checked.diagnostics, preprocessed.diagnostics].filter(Boolean)) {
+        diagnostics.push({ stage: 'compiler-warning', message })
+      }
     }
-    progress('checking-syntax')
-    const checked = await execute('gcc', [...flags, '-fsyntax-only', entry])
-    if (checked.code !== 0) throw new Error(checked.diagnostics || 'GCC syntax check failed')
-    progress('preprocessing')
-    const preprocessed = await execute('gcc', [...flags, '-E', entry, '-o', join(output, 'main.i')])
-    if (preprocessed.code !== 0) throw new Error(preprocessed.diagnostics || 'GCC preprocessing failed')
     result = {
       schemaVersion: 1, jobId, status: 'succeeded',
-      artifacts: [{ kind: 'preprocessed-source', path: 'main.i' }],
-      diagnostics: [checked.diagnostics, preprocessed.diagnostics].filter(Boolean).map(message => ({ stage: 'compiler-warning', message })),
+      artifacts, diagnostics,
     }
   } catch (error) {
     result = { schemaVersion: 1, jobId, status: 'failed', artifacts: [], diagnostics: [{ stage, message: String(error.message ?? error) }] }

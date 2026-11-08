@@ -1,12 +1,13 @@
 import { copyFile, lstat, mkdir, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import type { AnalysisRequest } from './contracts.js'
+import type { RuntimeConfig } from './config.js'
 
-export async function stageRequest(request: AnalysisRequest, jobId: string, jobDir: string, signal: AbortSignal, excludedRoot = dirname(jobDir)): Promise<void> {
+export async function stageRequest(request: AnalysisRequest, jobId: string, jobDir: string, signal: AbortSignal, limits: RuntimeConfig['limits'], excludedRoot = dirname(jobDir)): Promise<void> {
   const source = join(jobDir, 'input', 'source')
   await Promise.all(['input/source', 'work', 'output'].map(dir => mkdir(join(jobDir, dir), { recursive: true })))
   if (request.source !== undefined) {
-    const target = join(source, request.entryFile)
+    const target = join(source, request.entryFile!)
     await mkdir(dirname(target), { recursive: true })
     await writeFile(target, request.source)
   } else {
@@ -17,7 +18,7 @@ export async function stageRequest(request: AnalysisRequest, jobId: string, jobD
       signal.throwIfAborted()
       // A source project may contain the configured jobs root; never copy jobs into themselves.
       if (from === resolve(excludedRoot)) return
-      if (depth > 32) throw new Error('Project nesting exceeds 32 directories')
+      if (depth > limits.projectDepth) throw new Error(`Project nesting exceeds ${limits.projectDepth} directories`)
       const stat = await lstat(from)
       if (stat.isSymbolicLink()) throw new Error('Prototype project inputs must not contain symbolic links')
       if (stat.isDirectory()) {
@@ -29,7 +30,9 @@ export async function stageRequest(request: AnalysisRequest, jobId: string, jobD
       } else if (stat.isFile()) {
         files++
         bytes += stat.size
-        if (files > 1000 || bytes > 10 * 1024 * 1024) throw new Error('Prototype project limit: 1000 files and 10 MiB')
+        if (files > limits.projectFiles || bytes > limits.projectBytes) {
+          throw new Error(`Project limit: ${limits.projectFiles} files and ${limits.projectBytes} bytes`)
+        }
         await copyFile(from, to)
       } else throw new Error('Project input contains a non-regular file')
     }
@@ -37,9 +40,11 @@ export async function stageRequest(request: AnalysisRequest, jobId: string, jobD
     await copy(root, source, 0)
   }
   signal.throwIfAborted()
-  if (!(await lstat(join(source, request.entryFile))).isFile()) throw new Error('Entry file does not exist')
+  const requiredFile = request.entryFile ?? 'CMakeLists.txt'
+  if (!(await lstat(join(source, requiredFile))).isFile()) throw new Error(`Missing input file: ${requiredFile}`)
   await writeFile(join(jobDir, 'input', 'request.json'), JSON.stringify({
     schemaVersion: 1, jobId, operation: 'preprocess', languageStandard: 'c11',
     entryFile: request.entryFile, includeDirs: request.includeDirs, defines: request.defines,
+    errorTailBytes: limits.errorTailBytes,
   }, null, 2))
 }
