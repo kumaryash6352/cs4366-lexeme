@@ -1,0 +1,6 @@
+dist/
+.cache/
+.jobs/
+test/temp/
+*.tsbuildinfo
+*.log
