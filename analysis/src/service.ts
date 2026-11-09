@@ -1,15 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
-import { assertSuccess } from './command.js'
 import { parseRequest, parseResult } from './contracts.js'
-import type { AnalysisRequest, JobSnapshot } from './contracts.js'
+import type { NormalizedAnalysisRequest, JobSnapshot } from './contracts.js'
 import { analysisRoot, analysisTimeout, loadRuntimeConfig } from './config.js'
 import type { RuntimeConfig } from './config.js'
-import { PodmanRuntime } from './environment.js'
-import { stageRequest } from './staging.js'
-import { installPackages } from './packages.js'
-import { openWorkerLog } from './worker-log.js'
+import { assertSuccess, installPackages, PodmanRuntime } from './environment.js'
+import { openWorkerLog, stageRequest } from './staging.js'
 
 interface Job { snapshot: JobSnapshot; controller: AbortController; done: Promise<void>; finished: boolean }
 export interface ServiceOptions {
@@ -68,13 +65,19 @@ export class AnalysisService {
       'run', '--detach', '--name', containerName, '--pull=never',
       '--userns=keep-id', '--security-opt=no-new-privileges',
       `--memory=${this.config.container.memory}`, `--pids-limit=${this.config.container.pidsLimit}`,
-      '--volume', `${jobDir}:/jobs/${job.snapshot.id}:Z`, this.image!, '--serve',
+      '--volume', `${jobDir}:/jobs/${job.snapshot.id}:Z`,
+      ...(this.config.localDevelopment ? ['--volume', `${join(analysisRoot, 'worker')}:/app/worker:ro,Z`] : []),
+      this.image!, '--serve',
     ]), 'Job container startup')
     signal.throwIfAborted()
     this.event(job, 'verifying-worker', 'Checking the worker in the job container')
-    assertSuccess(await this.environment.command('podman', [
+    const checked = await this.environment.command('podman', [
       'exec', containerName, 'node', '/app/worker/main.mjs', '--self-check',
-    ]), 'Worker self-check')
+    ])
+    assertSuccess(checked, 'Worker self-check (rebuild the image if graph tools are missing)')
+    let graphProtocol
+    try { graphProtocol = JSON.parse(checked.stdout).graphProtocol } catch {  }
+    if (graphProtocol !== 1) throw new Error('Worker image lacks graph protocol 1; rebuild the image or enable localDevelopment with a current toolchain image')
     signal.throwIfAborted()
   }
 
@@ -84,9 +87,6 @@ export class AnalysisService {
     if (!this.startup) throw new Error('Call analysis.start() at application startup before submitting requests')
     if (this.runtimeFailure) throw new Error(this.runtimeFailure)
     const request = parseRequest(value, this.config.limits)
-    if (this.jobs.size >= this.config.limits.jobsPerSession) {
-      throw new Error(`Session limit reached (${this.config.limits.jobsPerSession} jobs); start a new application session`)
-    }
     const id = randomUUID()
     const job: Job = { snapshot: { id, status: 'queued', events: [] }, controller: new AbortController(), done: Promise.resolve(), finished: false }
     this.jobs.set(id, job)
@@ -106,7 +106,7 @@ export class AnalysisService {
   artifactPath(id: string, path?: string): string | undefined {
     const snapshot = this.get(id)
     if (snapshot?.status !== 'succeeded') return undefined
-    const artifact = path === undefined ? snapshot.result?.artifacts[0]
+    const artifact = path === undefined ? snapshot.result?.artifacts.find(artifact => artifact.kind === 'graphs')
       : snapshot.result?.artifacts.find(artifact => artifact.path === path)
     return artifact ? join(this.jobsRoot, id, 'output', artifact.path) : undefined
   }
@@ -152,7 +152,7 @@ export class AnalysisService {
     if (job.snapshot.events.length > 100) job.snapshot.events.shift()
   }
 
-  private async execute(job: Job, request: AnalysisRequest): Promise<void> {
+  private async execute(job: Job, request: NormalizedAnalysisRequest): Promise<void> {
     const { signal } = job.controller
     const jobDir = join(this.jobsRoot, job.snapshot.id)
     const containerName = `lexeme-job-${job.snapshot.id}`
@@ -216,12 +216,21 @@ export class AnalysisService {
       })
       signal.throwIfAborted()
       const resultPath = join(jobDir, 'output', 'result.json')
-      if ((await stat(resultPath)).size > 1024 * 1024) throw new Error('Worker result exceeds 1 MiB')
+      const resultFile = await stat(resultPath).catch(error => {
+        if (error.code === 'ENOENT') {
+          assertSuccess(run, 'Worker process')
+          throw new Error('Worker did not produce result.json')
+        }
+        throw error
+      })
+      if (resultFile.size > 1024 * 1024) throw new Error('Worker result exceeds 1 MiB')
       const result = parseResult(JSON.parse(await readFile(resultPath, 'utf8')), job.snapshot.id)
       if (result.status === 'succeeded') {
         assertSuccess(run, 'Worker process')
         for (const artifact of result.artifacts) {
-          if (!(await stat(join(jobDir, 'output', artifact.path))).isFile()) throw new Error(`Worker omitted ${artifact.path}`)
+          const file = await stat(join(jobDir, 'output', artifact.path))
+          if (!file.isFile()) throw new Error(`Worker omitted ${artifact.path}`)
+          if (file.size > this.config.limits.artifactBytes) throw new Error(`Worker artifact ${artifact.path} exceeds configured byte limit`)
         }
       } else if (run.code === 0) throw new Error('Worker reported failure but exited successfully')
       job.snapshot.result = result

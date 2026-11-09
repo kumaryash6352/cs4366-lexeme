@@ -12,6 +12,7 @@ import { loadRuntimeConfig, parseRuntimeConfig } from '../dist/config.js'
 const request = fields => ({ schemaVersion: 1, operation: 'parse', ...fields })
 const ok = (stdout = '') => ({ code: 0, stdout, stderr: '' })
 const runtimeInfo = JSON.stringify({ host: { serviceIsRemote: false, security: { rootless: true } } })
+const registryConfig = () => ({ ...loadRuntimeConfig(), image: 'ghcr.io/your-owner/analysiscontainer:v1', localDevelopment: false })
 function fakePodman(overrides = {}) {
   const calls = []
   const command = async (program, args, options) => {
@@ -41,20 +42,20 @@ test('startup pulls the configured registry image before creating a container', 
   const fake = fakePodman()
   const image = 'ghcr.io/your-owner/analysiscontainer:v1'
   const runtime = new PodmanRuntime({ command: fake.command, platform: 'linux', image })
-  assert.equal(await runtime.ensureReady(), image)
+  assert.equal(await runtime.ensureReady(undefined, registryConfig()), image)
   assert.deepEqual(fake.calls, [
     ['podman', '--version'], ['podman', 'info', '--format', 'json'], ['podman', 'pull', image],
   ])
 })
 
-test('default image comes from the independent configuration file', async () => {
+test('default image comes from the supplied runtime configuration', async () => {
   const savedImage = process.env.LEXEME_ANALYSIS_IMAGE
   delete process.env.LEXEME_ANALYSIS_IMAGE
   try {
-    const config = JSON.parse(await readFile(new URL('../runtime.config.json', import.meta.url), 'utf8'))
+    const config = registryConfig()
     const fake = fakePodman()
     const runtime = new PodmanRuntime({ command: fake.command, platform: 'linux' })
-    assert.equal(await runtime.ensureReady(), config.image)
+    assert.equal(await runtime.ensureReady(undefined, config), config.image)
     assert.deepEqual(fake.calls.at(-1), ['podman', 'pull', config.image])
   } finally {
     if (savedImage === undefined) delete process.env.LEXEME_ANALYSIS_IMAGE
@@ -66,7 +67,7 @@ test('registry failures stop startup without falling back to a cached image', as
   const fake = fakePodman({ command: async (_program, args) => args[0] === 'pull'
     ? { code: 125, stdout: '', stderr: 'registry access denied' } : undefined })
   const runtime = new PodmanRuntime({ command: fake.command, platform: 'linux' })
-  await assert.rejects(runtime.ensureReady(), /registry access denied/)
+  await assert.rejects(runtime.ensureReady(undefined, registryConfig()), /registry access denied/)
   assert.ok(!fake.calls.some(call => ['run', 'image', 'build'].includes(call[1])))
 })
 
@@ -94,7 +95,7 @@ test('unsupported hosts and nonlocal or rootful Podman fail before image lookup'
 test('Podman failures preserve diagnostics', async () => {
   for (const stage of ['info', 'pull']) {
     const fake = fakePodman({ command: async (_program, args) => args[0] === stage ? { code: 125, stdout: '', stderr: 'storage unavailable' } : undefined })
-    await assert.rejects(new PodmanRuntime({ command: fake.command, platform: 'linux' }).ensureReady(), /storage unavailable/)
+    await assert.rejects(new PodmanRuntime({ command: fake.command, platform: 'linux' }).ensureReady(undefined, registryConfig()), /storage unavailable/)
     assert.deepEqual(fake.calls.map(call => call[1]), stage === 'info' ? ['--version', 'info'] : ['--version', 'info', 'pull'])
   }
 })
@@ -162,7 +163,7 @@ async function serviceFixture(t, behavior = {}) {
         return ok()
       }
       if (args[0] === 'exec' && args.includes('--self-check')) {
-        return behavior.failSelfCheck ? { ...ok(), code: 1, stderr: 'self-check failure' } : ok()
+        return behavior.failSelfCheck ? { ...ok(), code: 1, stderr: 'self-check failure' } : ok(JSON.stringify({ graphProtocol: behavior.oldWorker ? 0 : 1 }))
       }
       if (args[0] === 'exec') {
         if (behavior.execThrows) throw new Error('exec disconnected')
@@ -192,14 +193,17 @@ async function serviceFixture(t, behavior = {}) {
           if (behavior.stderr) await options.onStderr?.(behavior.stderr)
           const failed = cancelled || behavior.failure
           if (!behavior.noResult) {
+            const artifacts = [{ kind: 'graphs', path: 'graphs.json' }, { kind: 'preprocessed-source', path: 'main.i' }]
+            if (behavior.reverseArtifacts) artifacts.reverse()
             await writeFile(join(dir, 'output/result.json'), JSON.stringify({
               schemaVersion: 1, jobId: input.jobId, status: failed ? 'failed' : 'succeeded',
-              artifacts: failed ? [] : [{ kind: 'preprocessed-source', path: 'main.i' }],
+              artifacts: failed ? [] : artifacts,
               diagnostics: failed ? [{ stage: 'checking-syntax', message: cancelled ? 'cancelled' : 'bad C syntax' }] : [],
             }))
+            if (!failed) await writeFile(join(dir, 'output/graphs.json'), JSON.stringify({ schemaVersion: 1, translationUnits: [], files: [], includes: { edges: [] }, calls: { nodes: [], edges: [] }, controlFlow: [] }))
             if (!failed) await writeFile(join(dir, 'output/main.i'), '# 1 "main.c"\nint main(void) { return 0; }')
           }
-          return { ...ok(), code: failed ? 1 : 0 }
+          return { code: failed ? 1 : 0, stdout: behavior.stdout ?? '', stderr: behavior.stderr ?? '' }
         } finally { active-- }
       }
       throw new Error(`Unexpected fake command: ${args.join(' ')}`)
@@ -215,6 +219,45 @@ async function serviceFixture(t, behavior = {}) {
   t.after(async () => { await service.shutdown(); await rm(root, { recursive: true, force: true }) })
   return { service, removed, containers, calls, packageCalls, workerPackages, environmentConfigs, configPath, starts: () => starts, preparations: () => preparations, executions: () => executions, maxActive: () => maxActive }
 }
+
+test('normalized requests can be submitted in all three input modes', async t => {
+  const fixture = await serviceFixture(t)
+  await fixture.service.start()
+  const project = getAnalysisRequest()
+  for (const input of [
+    request({ source: 'int x;' }),
+    { ...project, entryFile: 'main.c', defines: ['VALUE=1'] },
+    project,
+  ]) {
+    const normalized = parseRequest(input)
+    assert.deepEqual(parseRequest(normalized), normalized)
+    const job = fixture.service.submit(normalized)
+    assert.equal((await fixture.service.wait(job.id)).status, 'succeeded')
+    const staged = JSON.parse(await readFile(join(fixture.service.jobsRoot, job.id, 'input/request.json'), 'utf8'))
+    if (normalized.entryFile === undefined) {
+      for (const field of ['entryFile', 'includeDirs', 'defines']) {
+        assert.equal(Object.hasOwn(normalized, field), false)
+        assert.equal(Object.hasOwn(staged, field), false)
+      }
+    } else {
+      assert.deepEqual(staged.includeDirs, ['.'])
+      assert.deepEqual(staged.defines, input.defines ?? [])
+    }
+  }
+  assert.deepEqual(fixture.workerPackages, [[], ['zlib1g-dev'], ['zlib1g-dev']])
+})
+
+test('queued jobs retain the compiler settings supplied at submission', async t => {
+  const fixture = await serviceFixture(t)
+  await fixture.service.start()
+  const defines = ['VALUE=1']
+  const job = fixture.service.submit(request({ source: 'int x = VALUE;', defines }))
+  defines[0] = 'VALUE=2'
+  defines.push('EXTRA=1')
+  assert.equal((await fixture.service.wait(job.id)).status, 'succeeded')
+  const staged = JSON.parse(await readFile(join(fixture.service.jobsRoot, job.id, 'input/request.json'), 'utf8'))
+  assert.deepEqual(staged.defines, ['VALUE=1'])
+})
 
 test('mock backend request is accepted; missing or unsupported protocol is rejected', async () => {
   const example = await getAnalysisRequest()
@@ -254,9 +297,40 @@ test('compiler failures and missing result files remove the job container', asyn
     const job = fixture.service.submit(request({ source: 'bad C' }))
     const result = await fixture.service.wait(job.id)
     assert.equal(result.status, 'failed')
+    if (behavior.noResult) assert.match(result.error, /Worker did not produce result.json/)
+    else assert.equal(result.result.diagnostics[0].message, 'bad C syntax')
     assert.equal(fixture.removed.length, 1)
     assert.equal(fixture.containers.size, 0)
   }
+})
+
+test('worker crashes without a result preserve exit diagnostics and remove the container', async t => {
+  for (const output of [
+    { stderr: 'Cannot find worker module', stdout: 'earlier progress' },
+    { stdout: 'Worker startup failed' },
+  ]) {
+    const fixture = await serviceFixture(t, { failure: true, noResult: true, ...output })
+    await fixture.service.start()
+    const job = fixture.service.submit(request({ source: 'int x;' }))
+    const result = await fixture.service.wait(job.id)
+    assert.equal(result.status, 'failed')
+    assert.equal(result.error, `Worker process failed (1): ${output.stderr ?? output.stdout}`)
+    assert.equal(fixture.removed.length, 1)
+    assert.equal(fixture.containers.size, 0)
+  }
+})
+
+test('default artifact is graphs.json regardless of worker artifact order', async t => {
+  const fixture = await serviceFixture(t, { reverseArtifacts: true })
+  await fixture.service.start()
+  const job = fixture.service.submit(request({ source: 'int x;' }))
+  const result = await fixture.service.wait(job.id)
+  assert.equal(result.status, 'succeeded')
+  assert.equal(result.result.artifacts[0].path, 'main.i')
+  const output = join(fixture.service.jobsRoot, job.id, 'output')
+  assert.equal(fixture.service.artifactPath(job.id), join(output, 'graphs.json'))
+  assert.equal(fixture.service.artifactPath(job.id, 'main.i'), join(output, 'main.i'))
+  assert.equal(fixture.service.artifactPath(job.id, 'missing.i'), undefined)
 })
 
 test('timed-out job is removed before the next request uses a fresh container', async t => {
@@ -522,7 +596,7 @@ test('runtime configuration rejects malformed settings and unsupported worker ti
 })
 
 test('configured image pull timeout reaches Podman', async () => {
-  const config = loadRuntimeConfig()
+  const config = registryConfig()
   config.timeouts.imagePullMs = 43210
   const fake = fakePodman({ command: async (_program, args, options) => {
     if (args[0] === 'pull') assert.equal(options.timeoutMs, 43210)
@@ -531,17 +605,15 @@ test('configured image pull timeout reaches Podman', async () => {
   assert.ok(fake.calls.some(call => call[1] === 'pull'))
 })
 
-test('configuration is read once and controls job resources, timeouts and session capacity', async t => {
+test('configuration is read once and controls job resources and timeouts', async t => {
   const config = loadRuntimeConfig()
   config.container = { memory: '1g', pidsLimit: 64 }
   config.timeouts = { analysisMs: 1234, imagePullMs: 2345, packageCommandMs: 3456 }
-  config.limits.jobsPerSession = 1
   const fixture = await serviceFixture(t, { config })
   // Editing the file after construction must not alter this service's settings.
   await writeFile(fixture.configPath, 'invalid JSON')
   await fixture.service.start()
   const job = fixture.service.submit(request({ source: 'int x;', dependencies: ['zlib1g-dev'] }))
-  assert.throws(() => fixture.service.submit(request({ source: 'int y;' })), /1 jobs/)
   assert.equal((await fixture.service.wait(job.id)).status, 'succeeded')
   assert.deepEqual(fixture.environmentConfigs, [config])
   const run = fixture.calls.find(args => args[0] === 'run')
@@ -598,6 +670,7 @@ test('request budgets are configurable, count source bytes, and deduplicate depe
   assert.equal(parseRequest(request({ source: '', includeDirs: Array(40).fill('.'), defines: Array(40).fill('ONE'), dependencies: Array.from({ length: 70 }, (_, i) => `package-${i}`) }), large).dependencies.length, 70)
   assert.equal(parseRequest(request({ projectDir: '/project' })).entryFile, undefined)
   assert.throws(() => parseRequest(request({ projectDir: '/project', defines: ['IGNORED'] })), /CMakeLists.txt/)
+  assert.throws(() => parseRequest(request({ projectDir: '/project', includeDirs: ['include'] })), /CMakeLists.txt/)
 })
 
 test('service uses configured request and log budgets, including installation above 64 packages', async t => {
@@ -621,8 +694,48 @@ test('result accepts multiple translation units while rejecting unsafe artifact 
     { kind: 'preprocessed-source', path: 'unit-1.i', source: 'src/first.c' },
     { kind: 'preprocessed-source', path: 'unit-2.i', source: 'src/second.c' },
   ] }
-  assert.equal(parseResult(result, 'job').artifacts.length, 2)
+  result.artifacts.unshift({ kind: 'graphs', path: 'graphs.json' })
+  assert.equal(parseResult(result, 'job').artifacts.length, 3)
   for (const path of ['../main.i', '/tmp/main.i', 'sub/main.i']) {
     assert.throws(() => parseResult({ ...result, artifacts: [{ kind: 'preprocessed-source', path }] }, 'job'), /unsupported artifact/)
   }
+})
+
+test('local development uses an existing image without pulling', async () => {
+  const config = loadRuntimeConfig()
+  config.localDevelopment = true
+  const fake = fakePodman({ command: async (_program, args) => args[0] === 'image' ? ok() : undefined })
+  await new PodmanRuntime({ command: fake.command, platform: 'linux' }).ensureReady(undefined, config)
+  assert.deepEqual(fake.calls.at(-1), ['podman', 'image', 'exists', config.image])
+  assert.ok(!fake.calls.some(call => call[1] === 'pull'))
+  const absent = fakePodman()
+  await assert.rejects(new PodmanRuntime({ command: absent.command, platform: 'linux' }).ensureReady(undefined, config), /build analysis\/Containerfile first/)
+})
+
+test('local development mounts repository worker read-only and returns graphs.json', async t => {
+  const config = loadRuntimeConfig()
+  config.localDevelopment = true
+  // The generic fixture expects the first mount to be the job; local worker is added second.
+  const fixture = await serviceFixture(t, { config })
+  await fixture.service.start()
+  const job = fixture.service.submit(request({ source: 'int x;' }))
+  assert.equal((await fixture.service.wait(job.id)).status, 'succeeded')
+  assert.ok(fixture.calls.find(args => args[0] === 'run').some(arg => arg.endsWith(':/app/worker:ro,Z')))
+  assert.equal(fixture.service.artifactPath(job.id), join(fixture.service.jobsRoot, job.id, 'output', 'graphs.json'))
+})
+
+test('old workers fail before dependency installation with a rebuild instruction', async t => {
+  const fixture = await serviceFixture(t, { oldWorker: true })
+  await fixture.service.start()
+  const job = fixture.service.submit(request({ source: 'int x;', dependencies: ['zlib1g-dev'] }))
+  const result = await fixture.service.wait(job.id)
+  assert.equal(result.status, 'failed')
+  assert.match(result.error, /graph protocol 1; rebuild/)
+  assert.equal(fixture.packageCalls.length, 0)
+  assert.equal(fixture.removed.length, 1)
+})
+
+test('successful worker results require the graph artifact', () => {
+  const result = { schemaVersion: 1, jobId: 'job', status: 'succeeded', artifacts: [{ kind: 'preprocessed-source', path: 'main.i' }], diagnostics: [] }
+  assert.throws(() => parseResult(result, 'job'), /graphs.json/)
 })

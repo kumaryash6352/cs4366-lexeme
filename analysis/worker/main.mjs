@@ -1,52 +1,77 @@
 import { spawn } from 'node:child_process'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { join, relative, resolve, sep } from 'node:path'
-import { existsSync } from 'node:fs'
+import { join, resolve, sep } from 'node:path'
+import { closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs'
+import { analyzeUnit, assembleGraphs } from './graphs/model.mjs'
 import { fileURLToPath } from 'node:url'
 
 let control
 let errorTailBytes = 4096
+let artifactBytes = 32 * 1024 * 1024
 function interruption() {
   if (control && existsSync(control.cancelPath)) return 'Job cancelled'
   if (control && Date.now() >= control.deadline) return 'Job timed out'
   return ''
 }
 
-function execute(program, args, cwd) {
-  return new Promise((resolve, reject) => {
-    const before = interruption()
-    if (before) { reject(new Error(before)); return }
-    const child = spawn(program, args, { cwd, shell: false, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
-    let output = Buffer.alloc(0)
-    let diagnostics = Buffer.alloc(0)
-    let interrupted = ''
-    let killTimer
-    const killGroup = signal => {
-      if (!child.pid) return
-      try { process.kill(-child.pid, signal) } catch (error) { if (error.code !== 'ESRCH') child.kill(signal) }
-    }
-    const monitor = setInterval(() => {
-      const reason = interruption()
-      if (reason && !interrupted) {
-        interrupted = reason
-        killGroup('SIGTERM')
-        killTimer = setTimeout(() => killGroup('SIGKILL'), 250)
+async function execute(program, args, cwd, capture = {}) {
+  const handles = []
+  const file = path => { if (!path) return 'pipe'; const fd = openSync(path, 'w+'); handles.push(fd); return fd }
+  const tail = fd => {
+    const size = fstatSync(fd).size
+    const buffer = Buffer.alloc(Math.min(size, errorTailBytes))
+    readSync(fd, buffer, 0, buffer.length, size - buffer.length)
+    return buffer.toString('utf8')
+  }
+  try {
+    const stdout = file(capture.stdoutFile), stderr = file(capture.stderrFile)
+    return await new Promise((resolve, reject) => {
+      const before = interruption()
+      if (before) { reject(new Error(before)); return }
+      const child = spawn(program, args, { cwd, shell: false, detached: true, stdio: ['ignore', stdout, stderr] })
+      let output = Buffer.alloc(0)
+      let diagnostics = Buffer.alloc(0)
+      let interrupted = ''
+      let killTimer
+      const killGroup = signal => {
+        if (!child.pid) return
+        try { process.kill(-child.pid, signal) } catch (error) { if (error.code !== 'ESRCH') child.kill(signal) }
       }
-    }, 25)
-    const cleanup = () => { clearInterval(monitor); if (killTimer) clearTimeout(killTimer) }
-    child.stdout.on('data', chunk => { output = Buffer.from(Buffer.concat([output, chunk]).subarray(-errorTailBytes)) })
-    child.stderr.on('data', chunk => {
-      diagnostics = Buffer.from(Buffer.concat([diagnostics, chunk]).subarray(-errorTailBytes))
+      const monitor = setInterval(() => {
+        const reason = interruption() || (handles.some(fd => fstatSync(fd).size > artifactBytes) ? 'Analysis artifact byte limit exceeded' : '')
+        if (reason && !interrupted) {
+          interrupted = reason
+          killGroup('SIGTERM')
+          killTimer = setTimeout(() => killGroup('SIGKILL'), 250)
+        }
+      }, 25)
+      const cleanup = () => { clearInterval(monitor); if (killTimer) clearTimeout(killTimer) }
+      child.stdout?.on('data', chunk => { output = Buffer.from(Buffer.concat([output, chunk]).subarray(-errorTailBytes)) })
+      child.stderr?.on('data', chunk => {
+        diagnostics = Buffer.from(Buffer.concat([diagnostics, chunk]).subarray(-errorTailBytes))
+      })
+      child.stdout?.pipe(process.stderr, { end: false })
+      child.stderr?.pipe(process.stderr, { end: false })
+      let spawnFailed = false
+      child.on('error', error => { spawnFailed = true; cleanup(); reject(error) })
+      child.on('close', code => {
+        cleanup()
+        if (spawnFailed) return
+        if (interrupted) reject(new Error(interrupted))
+        else resolve({ code: code ?? 1, output: typeof stdout === 'number' ? tail(stdout) : output.toString('utf8'), diagnostics: typeof stderr === 'number' ? tail(stderr) : diagnostics.toString('utf8') })
+      })
     })
-    child.stdout.pipe(process.stderr, { end: false })
-    child.stderr.pipe(process.stderr, { end: false })
-    child.on('error', error => { cleanup(); reject(error) })
-    child.on('close', code => {
-      cleanup()
-      if (interrupted) reject(new Error(interrupted))
-      else resolve({ code: code ?? 1, output: output.toString('utf8'), diagnostics: diagnostics.toString('utf8') })
-    })
-  })
+  } finally { for (const fd of handles) closeSync(fd) }
+}
+
+async function toolVersions() {
+  const versions = {}
+  for (const program of ['gcc', 'cmake', 'python3', 'nm']) {
+    const result = await execute(program, ['--version'])
+    if (result.code !== 0) throw new Error(`${program} is unavailable`)
+    versions[program] = result.output.split('\n')[0]
+  }
+  return versions
 }
 
 if (process.argv.includes('--serve')) {
@@ -56,9 +81,7 @@ if (process.argv.includes('--serve')) {
   for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => clearInterval(heartbeat))
   console.log(JSON.stringify({ type: 'ready', schemaVersion: 1 }))
 } else if (process.argv.includes('--self-check')) {
-  const gcc = await execute('gcc', ['--version'])
-  if (gcc.code !== 0) throw new Error('GCC is unavailable')
-  console.log(JSON.stringify({ schemaVersion: 1, node: process.version, gcc: gcc.output.split('\n')[0] }))
+  console.log(JSON.stringify({ schemaVersion: 1, graphProtocol: 1, node: process.version, tools: await toolVersions() }))
 } else {
   const jobIndex = process.argv.indexOf('--job')
   const id = jobIndex >= 0 ? process.argv[jobIndex + 1] : undefined
@@ -87,12 +110,14 @@ if (process.argv.includes('--serve')) {
   try {
     progress('validating')
     const request = JSON.parse(await readFile(join(input, 'request.json'), 'utf8'))
-    if (request.schemaVersion !== 1 || request.jobId !== id || request.operation !== 'preprocess' || request.languageStandard !== 'c11') {
+    if (request.schemaVersion !== 1 || request.jobId !== id || request.operation !== 'analyze' || request.languageStandard !== 'c11') {
       throw new Error('Unsupported request protocol')
     }
     jobId = request.jobId
     if (!Number.isSafeInteger(request.errorTailBytes) || request.errorTailBytes < 1) throw new Error('Invalid diagnostic limit')
     errorTailBytes = request.errorTailBytes
+    if (!Number.isSafeInteger(request.artifactBytes) || request.artifactBytes < 1) throw new Error('Invalid artifact limit')
+    artifactBytes = request.artifactBytes
     let commands
     if (request.entryFile === undefined) {
       progress('configuring-cmake')
@@ -121,22 +146,22 @@ if (process.argv.includes('--serve')) {
       }
       commands = [{ args: ['gcc', ...flags, entry], directory: sourceRoot, file: entry }]
     }
-    const artifacts = []
-    const diagnostics = []
+    const tools = await toolVersions()
+    const units = []
     for (const [index, command] of commands.entries()) {
-      const [compiler, ...flags] = command.args
-      const path = request.entryFile === undefined ? `unit-${index + 1}.i` : 'main.i'
-      progress('checking-syntax')
-      const checked = await execute(compiler, [...flags, '-fsyntax-only'], command.directory)
-      if (checked.code !== 0) throw new Error(checked.diagnostics || checked.output || `Syntax check failed: ${command.file}`)
-      progress('preprocessing')
-      const preprocessed = await execute(compiler, [...flags, '-E', '-o', join(output, path)], command.directory)
-      if (preprocessed.code !== 0) throw new Error(preprocessed.diagnostics || preprocessed.output || `Preprocessing failed: ${command.file}`)
-      artifacts.push({ kind: 'preprocessed-source', path, source: relative(sourceRoot, command.file) })
-      for (const message of [checked.diagnostics, preprocessed.diagnostics].filter(Boolean)) {
-        diagnostics.push({ stage: 'compiler-warning', message })
-      }
+      const unit = await analyzeUnit(command, index, {
+        sourceRoot, workRoot: join(jobDir, 'work'), output,
+        single: request.entryFile !== undefined, maxBytes: artifactBytes,
+      }, execute, progress)
+      if (!units.some(previous => previous.unit.id === unit.unit.id)) units.push(unit)
     }
+    progress('writing-graphs')
+    const graphs = JSON.stringify(assembleGraphs(units, tools), null, 2)
+    if (Buffer.byteLength(graphs) > artifactBytes) throw new Error('Graph JSON exceeds configured artifact byte limit')
+    await writeFile(join(output, 'graphs.json.tmp'), graphs)
+    await rename(join(output, 'graphs.json.tmp'), join(output, 'graphs.json'))
+    const artifacts = [{ kind: 'graphs', path: 'graphs.json' }, ...units.map(unit => unit.artifact)]
+    const diagnostics = units.flatMap(unit => unit.diagnostics)
     result = {
       schemaVersion: 1, jobId, status: 'succeeded',
       artifacts, diagnostics,

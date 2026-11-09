@@ -7,12 +7,13 @@ export type Notify = (stage: string, message: string) => void
 
 export interface RuntimeConfig {
   image: string
+  localDevelopment: boolean
   container: { memory: string; pidsLimit: number }
   timeouts: { analysisMs: number; imagePullMs: number; packageCommandMs: number }
   limits: {
-    jobsPerSession: number; projectFiles: number; projectBytes: number; projectDepth: number
+    projectFiles: number; projectBytes: number; projectDepth: number
     sourceBytes: number; includeDirs: number; defines: number; maxRequestedDependencies: number
-    workerLogBytes: number; errorTailBytes: number
+    workerLogBytes: number; errorTailBytes: number; artifactBytes: number
   }
 }
 
@@ -45,11 +46,13 @@ export function parseRuntimeConfig(value: unknown): RuntimeConfig {
   const container = object(config.container, 'container')
   const timeouts = object(config.timeouts, 'timeouts')
   const limits = object(config.limits, 'limits')
+  if (config.localDevelopment !== undefined && typeof config.localDevelopment !== 'boolean') throw new Error('localDevelopment must be a boolean')
   if (typeof container.memory !== 'string' || !/^[1-9][0-9]*[bkmg]?$/i.test(container.memory)) {
     throw new Error('container.memory must be a positive size such as "512m" or "1g"')
   }
   return {
     image: imageName(config.image),
+    localDevelopment: config.localDevelopment === true,
     container: {
       memory: container.memory,
       pidsLimit: positiveInteger(container.pidsLimit, 'container.pidsLimit'),
@@ -61,7 +64,6 @@ export function parseRuntimeConfig(value: unknown): RuntimeConfig {
       packageCommandMs: positiveInteger(timeouts.packageCommandMs, 'timeouts.packageCommandMs', 2_147_483_647),
     },
     limits: {
-      jobsPerSession: positiveInteger(limits.jobsPerSession, 'limits.jobsPerSession'),
       projectFiles: positiveInteger(limits.projectFiles, 'limits.projectFiles'),
       projectBytes: positiveInteger(limits.projectBytes, 'limits.projectBytes'),
       projectDepth: positiveInteger(limits.projectDepth, 'limits.projectDepth'),
@@ -71,6 +73,7 @@ export function parseRuntimeConfig(value: unknown): RuntimeConfig {
       maxRequestedDependencies: positiveInteger(limits.maxRequestedDependencies, 'limits.maxRequestedDependencies'),
       workerLogBytes: positiveInteger(limits.workerLogBytes, 'limits.workerLogBytes'),
       errorTailBytes: positiveInteger(limits.errorTailBytes, 'limits.errorTailBytes'),
+      artifactBytes: positiveInteger(limits.artifactBytes, 'limits.artifactBytes'),
     },
   }
 }

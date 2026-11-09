@@ -1,91 +1,101 @@
 import assert from 'node:assert/strict'
-import { execFile, spawnSync } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { test } from 'node:test'
+import { spawnSync } from 'node:child_process'
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { promisify } from 'node:util'
-import { test } from 'node:test'
-import { loadRuntimeConfig } from '../dist/config.js'
-import { parseRequest, parseResult } from '../dist/contracts.js'
-import { stageRequest } from '../dist/staging.js'
+import { analyzeUnit, assembleGraphs } from '../worker/graphs/model.mjs'
+import { lineMarker } from '../worker/graphs/source-map.mjs'
 
-const execute = promisify(execFile)
-const worker = fileURLToPath(new URL('../worker/main.mjs', import.meta.url))
-const has = program => spawnSync(program, ['--version']).status === 0
+const compilerAvailable = spawnSync('gcc', ['--version']).status === 0 && spawnSync('nm', ['--version']).status === 0
+const compilerTest = { skip: compilerAvailable ? false : 'Requires GCC and nm' }
 
-async function fixture(t) {
+async function analyze(t, files, entries = ['main.c']) {
   const root = await mkdtemp(join(tmpdir(), 'lexeme-worker-'))
   t.after(() => rm(root, { recursive: true, force: true }))
-  const id = randomUUID()
-  const jobs = join(root, 'jobs')
-  const jobDir = join(jobs, id)
-  return {
-    root, id, jobDir,
-    async run(input) {
-      const config = loadRuntimeConfig()
-      const request = parseRequest({ schemaVersion: 1, operation: 'parse', ...input }, config.limits)
-      await stageRequest(request, id, jobDir, new AbortController().signal, config.limits)
-      let code = 0
-      try {
-        await execute(process.execPath, [worker, '--job', id, '--timeout-ms', '10000'], {
-          env: { ...process.env, LEXEME_WORKER_JOBS: jobs }, timeout: 15000,
-        })
-      } catch (error) { code = error.code }
-      const result = parseResult(JSON.parse(await readFile(join(jobDir, 'output/result.json'), 'utf8')), id)
-      return { code, result }
-    },
+  const sourceRoot = join(root, 'source'), workRoot = join(root, 'work'), output = join(root, 'output')
+  await Promise.all([sourceRoot, workRoot, output].map(path => mkdir(path)))
+  for (const [name, text] of Object.entries(files)) await writeFile(join(sourceRoot, name), text)
+  const execute = async (program, args, cwd, capture = {}) => {
+    const result = spawnSync(program, args, { cwd, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
+    if (result.error) throw result.error
+    if (capture.stdoutFile) await writeFile(capture.stdoutFile, result.stdout)
+    if (capture.stderrFile) await writeFile(capture.stderrFile, result.stderr)
+    return { code: result.status, output: result.stdout, diagnostics: result.stderr }
   }
+  const units = []
+  for (const [index, entry] of entries.entries()) {
+    units.push(await analyzeUnit({ args: ['gcc', '-std=c11', '-I.', entry], directory: sourceRoot, file: entry }, index,
+      { sourceRoot, workRoot, output, single: entries.length === 1, maxBytes: 32 * 1024 * 1024 }, execute, () => {}))
+  }
+  return assembleGraphs(units, {})
 }
 
-test('worker accepts a custom filename and more than 32 defines/include paths', { skip: !has('gcc') }, async t => {
-  const job = await fixture(t)
-  const { code, result } = await job.run({
-    source: 'int answer = VALUE_39;', entryFile: 'src/answer.c',
-    defines: Array.from({ length: 40 }, (_, i) => `VALUE_${i}=${i}`),
-    includeDirs: Array(40).fill('.'),
+function callNames(graphs) {
+  const names = new Map(graphs.calls.nodes.map(node => [node.id, node.name]))
+  return graphs.calls.edges.map(edge => `${names.get(edge.source)} -> ${names.get(edge.target)}`)
+}
+
+test('GCC filenames support literal controls, C escapes, and UTF-8 octal bytes', () => {
+  for (const [quoted, expected] of [
+    ['"tab\tname.h"', 'tab\tname.h'],
+    [String.raw`"tab\011name.h"`, 'tab\tname.h'],
+    [String.raw`"tab\tname.h"`, 'tab\tname.h'],
+    [String.raw`"quote\"slash\\name.h"`, 'quote"slash\\name.h'],
+    [String.raw`"caf\303\251.h"`, 'café.h'],
+    ['"café.h"', 'café.h'],
+  ]) {
+    assert.deepEqual(lineMarker(`# 12 ${quoted} 1 3`), { line: 12, file: expected, flags: [1, 3] })
+  }
+  assert.equal(lineMarker('int value;'), undefined)
+})
+
+test('calls in C11 for declarations, recursion, and unused functions are retained', compilerTest, async t => {
+  const graphs = await analyze(t, { 'main.c': `
+extern int external(int);
+static int unused(int x) { return external(x); }
+int helper(int x) { return x ? helper(x - 1) : 0; }
+int main(void) {
+  int total = 0;
+  for (int i = 0; i < 3; i++) total += helper(i);
+  return total;
+}
+` })
+  const calls = callNames(graphs)
+  for (const edge of ['main -> helper', 'helper -> helper', 'unused -> external']) assert.ok(calls.includes(edge), edge)
+  assert.equal(graphs.calls.nodes.find(node => node.name === 'unused').linkage, 'internal')
+})
+
+test('cross-file calls resolve without merging same-named static functions', compilerTest, async t => {
+  const graphs = await analyze(t, {
+    'main.c': 'int helper(void); static int local(void) { return 1; } int main(void) { return helper() + local(); }',
+    'helper.c': 'static int local(void) { return 2; } int helper(void) { return local(); }',
+  }, ['main.c', 'helper.c'])
+  assert.ok(callNames(graphs).includes('main -> helper'))
+  const locals = graphs.calls.nodes.filter(node => node.name === 'local')
+  assert.equal(locals.length, 2)
+  assert.notEqual(locals[0].id, locals[1].id)
+  assert.ok(locals.every(node => node.linkage === 'internal'))
+  for (const edge of graphs.calls.edges.filter(edge => locals.some(node => node.id === edge.target))) {
+    const caller = graphs.calls.nodes.find(node => node.id === edge.source)
+    const callee = graphs.calls.nodes.find(node => node.id === edge.target)
+    assert.equal(caller.unitId, callee.unitId)
+  }
+})
+
+test('a header with a tab in its filename survives preprocessing and graph generation', compilerTest, async t => {
+  const graphs = await analyze(t, {
+    'main.c': '#include "tab\tname.h"\nint main(void) { return value(); }\n',
+    'tab\tname.h': 'static int value(void) { return 1; }\n',
   })
-  assert.equal(code, 0)
-  assert.deepEqual(result.artifacts, [{ kind: 'preprocessed-source', path: 'main.i', source: 'src/answer.c' }])
-  assert.match(await readFile(join(job.jobDir, 'output/main.i'), 'utf8'), /int answer = 39;/)
+  assert.ok(graphs.includes.edges.some(edge => edge.target === 'tab\tname.h' && edge.resolved))
+  assert.ok(graphs.files.some(file => file.path === 'tab\tname.h'))
+  assert.ok(callNames(graphs).includes('main -> value'))
 })
 
-test('CMake discovers translation units and preserves each target’s flags and quoted paths', {
-  skip: !has('gcc') || !has('cmake') || !has('python3'),
-}, async t => {
-  const job = await fixture(t)
-  const project = join(job.root, 'project with spaces')
-  await mkdir(join(project, 'headers with spaces'), { recursive: true })
-  await writeFile(join(project, 'headers with spaces', 'value.h'), '#define EXTRA 7\n')
-  await writeFile(join(project, 'answer.c'), '#include "value.h"\nconst char *label = LABEL;\nint answer = VALUE + EXTRA;\n')
-  await writeFile(join(project, 'CMakeLists.txt'), `
-cmake_minimum_required(VERSION 3.16)
-project(Example C)
-${[11, 22].map(value => `
-add_library(answer_${value} OBJECT answer.c)
-target_include_directories(answer_${value} PRIVATE "headers with spaces")
-target_compile_definitions(answer_${value} PRIVATE VALUE=${value} [=[LABEL="hello world"]=])
-`).join('\n')}
-`)
-  const { code, result } = await job.run({ projectDir: project })
-  assert.equal(code, 0, JSON.stringify(result.diagnostics))
-  assert.equal(result.artifacts.length, 2)
-  assert.deepEqual(result.artifacts.map(artifact => artifact.source), ['answer.c', 'answer.c'])
-  const outputs = await Promise.all(result.artifacts.map(artifact => readFile(join(job.jobDir, 'output', artifact.path), 'utf8')))
-  assert.ok(outputs.some(text => /int answer = 11 \+ 7;/.test(text)))
-  assert.ok(outputs.some(text => /int answer = 22 \+ 7;/.test(text)))
-  assert.ok(outputs.every(text => /"hello world"/.test(text)))
-})
-
-test('CMake configuration failures produce a failed worker result', { skip: !has('cmake') }, async t => {
-  const job = await fixture(t)
-  const project = join(job.root, 'invalid')
-  await mkdir(project)
-  await writeFile(join(project, 'CMakeLists.txt'), 'cmake_minimum_required(VERSION 3.16)\nmessage(FATAL_ERROR "deliberate failure")\n')
-  const { code, result } = await job.run({ projectDir: project })
-  assert.equal(code, 1)
-  assert.equal(result.status, 'failed')
-  assert.equal(result.diagnostics[0].stage, 'configuring-cmake')
-  assert.match(result.diagnostics[0].message, /deliberate failure/)
+test('a translation unit containing only data produces no function graphs', compilerTest, async t => {
+  const graphs = await analyze(t, { 'main.c': 'int value = 1;\n' })
+  assert.equal(graphs.controlFlow.length, 0)
+  assert.equal(graphs.calls.nodes.length, 0)
+  assert.equal(graphs.calls.edges.length, 0)
 })

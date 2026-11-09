@@ -1,5 +1,6 @@
 {
-  "image": "ghcr.io/mmaa304603/analysiscontainer:v2",
+  "image": "localhost/lexeme-analysis:dev",
+  "localDevelopment": true,
   "container": {
     "memory": "512m",
     "pidsLimit": 128
@@ -10,7 +11,6 @@
     "packageCommandMs": 300000
   },
   "limits": {
-    "jobsPerSession": 100,
     "projectFiles": 1000,
     "projectBytes": 10485760,
     "projectDepth": 32,
@@ -19,6 +19,7 @@
     "defines": 256,
     "maxRequestedDependencies": 128,
     "workerLogBytes": 10485760,
-    "errorTailBytes": 4096
+    "errorTailBytes": 4096,
+    "artifactBytes": 33554432
   }
 }

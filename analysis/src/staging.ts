@@ -1,17 +1,17 @@
-import { copyFile, lstat, mkdir, readdir, writeFile } from 'node:fs/promises'
+import { copyFile, lstat, mkdir, open, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
-import type { AnalysisRequest } from './contracts.js'
+import type { NormalizedAnalysisRequest } from './contracts.js'
 import type { RuntimeConfig } from './config.js'
 
-export async function stageRequest(request: AnalysisRequest, jobId: string, jobDir: string, signal: AbortSignal, limits: RuntimeConfig['limits'], excludedRoot = dirname(jobDir)): Promise<void> {
+export async function stageRequest(request: NormalizedAnalysisRequest, jobId: string, jobDir: string, signal: AbortSignal, limits: RuntimeConfig['limits'], excludedRoot = dirname(jobDir)): Promise<void> {
   const source = join(jobDir, 'input', 'source')
   await Promise.all(['input/source', 'work', 'output'].map(dir => mkdir(join(jobDir, dir), { recursive: true })))
   if (request.source !== undefined) {
-    const target = join(source, request.entryFile!)
+    const target = join(source, request.entryFile)
     await mkdir(dirname(target), { recursive: true })
     await writeFile(target, request.source)
   } else {
-    const root = resolve(request.projectDir!)
+    const root = resolve(request.projectDir)
     let files = 0
     let bytes = 0
     const copy = async (from: string, to: string, depth: number): Promise<void> => {
@@ -43,8 +43,38 @@ export async function stageRequest(request: AnalysisRequest, jobId: string, jobD
   const requiredFile = request.entryFile ?? 'CMakeLists.txt'
   if (!(await lstat(join(source, requiredFile))).isFile()) throw new Error(`Missing input file: ${requiredFile}`)
   await writeFile(join(jobDir, 'input', 'request.json'), JSON.stringify({
-    schemaVersion: 1, jobId, operation: 'preprocess', languageStandard: 'c11',
+    schemaVersion: 1, jobId, operation: 'analyze', languageStandard: 'c11',
     entryFile: request.entryFile, includeDirs: request.includeDirs, defines: request.defines,
     errorTailBytes: limits.errorTailBytes,
+    artifactBytes: limits.artifactBytes,
   }, null, 2))
+}
+
+/** Stream a bounded log to disk; callers await writes to avoid buffering output. */
+export async function openWorkerLog(path: string, maxBytes: number) {
+  const file = await open(path, 'w')
+  const marker = Buffer.from('\n[worker log truncated]\n').subarray(0, maxBytes)
+  const contentLimit = maxBytes - marker.length
+  let written = 0
+  let truncated = false
+  let pending = Promise.resolve()
+  return {
+    write(text: string): Promise<void> {
+      pending = pending.then(async () => {
+        if (truncated) return
+        const bytes = Buffer.from(text)
+        const kept = bytes.subarray(0, contentLimit - written)
+        if (kept.length) await file.writeFile(kept)
+        written += kept.length
+        if (kept.length < bytes.length) {
+          await file.writeFile(marker)
+          truncated = true
+        }
+      })
+      return pending
+    },
+    async close(): Promise<void> {
+      try { await pending } finally { await file.close() }
+    },
+  }
 }
