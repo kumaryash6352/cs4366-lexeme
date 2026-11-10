@@ -1,13 +1,15 @@
 import { spawn } from 'node:child_process'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { join, resolve, sep } from 'node:path'
-import { closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs'
-import { analyzeUnit, assembleGraphs } from './graphs/model.mjs'
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readSync, statSync } from 'node:fs'
+import { analyzeUnit, assembleGraphs, readArtifact, uniqueCommands } from './graphs/model.mjs'
 import { fileURLToPath } from 'node:url'
+import { workerConfig } from './config.mjs'
 
+// Per-process job state; request limits replace the defaults after validation.
 let control
-let errorTailBytes = 4096
-let artifactBytes = 32 * 1024 * 1024
+let errorTailBytes = workerConfig.errorTailBytes
+let artifactBytes = workerConfig.artifactBytes
 function interruption() {
   if (control && existsSync(control.cancelPath)) return 'Job cancelled'
   if (control && Date.now() >= control.deadline) return 'Job timed out'
@@ -23,10 +25,30 @@ async function execute(program, args, cwd, capture = {}) {
     readSync(fd, buffer, 0, buffer.length, size - buffer.length)
     return buffer.toString('utf8')
   }
+  const outputLimitError = () => {
+    try {
+      if (handles.some(fd => fstatSync(fd).size > artifactBytes)) return 'Analysis artifact byte limit exceeded'
+      const paths = [...(capture.watchFiles ?? [])]
+      for (const directory of capture.watchDirectories ?? []) {
+        for (const entry of readdirSync(directory, { withFileTypes: true })) {
+          if (entry.isFile()) paths.push(join(directory, entry.name))
+        }
+      }
+      for (const path of paths) {
+        try {
+          if (statSync(path).size > artifactBytes) return `Analysis artifact byte limit exceeded: ${path}`
+        } catch (error) {
+          // Compiler outputs may not exist yet, or may be replaced between checks.
+          if (error.code !== 'ENOENT') throw error
+        }
+      }
+      return ''
+    } catch (error) { return `Cannot monitor analysis artifacts: ${error.message}` }
+  }
   try {
     const stdout = file(capture.stdoutFile), stderr = file(capture.stderrFile)
     return await new Promise((resolve, reject) => {
-      const before = interruption()
+      const before = interruption() || outputLimitError()
       if (before) { reject(new Error(before)); return }
       const child = spawn(program, args, { cwd, shell: false, detached: true, stdio: ['ignore', stdout, stderr] })
       let output = Buffer.alloc(0)
@@ -38,13 +60,13 @@ async function execute(program, args, cwd, capture = {}) {
         try { process.kill(-child.pid, signal) } catch (error) { if (error.code !== 'ESRCH') child.kill(signal) }
       }
       const monitor = setInterval(() => {
-        const reason = interruption() || (handles.some(fd => fstatSync(fd).size > artifactBytes) ? 'Analysis artifact byte limit exceeded' : '')
+        const reason = interruption() || outputLimitError()
         if (reason && !interrupted) {
           interrupted = reason
           killGroup('SIGTERM')
-          killTimer = setTimeout(() => killGroup('SIGKILL'), 250)
+          killTimer = setTimeout(() => killGroup('SIGKILL'), workerConfig.killGraceMs)
         }
-      }, 25)
+      }, workerConfig.monitorIntervalMs)
       const cleanup = () => { clearInterval(monitor); if (killTimer) clearTimeout(killTimer) }
       child.stdout?.on('data', chunk => { output = Buffer.from(Buffer.concat([output, chunk]).subarray(-errorTailBytes)) })
       child.stderr?.on('data', chunk => {
@@ -57,8 +79,12 @@ async function execute(program, args, cwd, capture = {}) {
       child.on('close', code => {
         cleanup()
         if (spawnFailed) return
-        if (interrupted) reject(new Error(interrupted))
-        else resolve({ code: code ?? 1, output: typeof stdout === 'number' ? tail(stdout) : output.toString('utf8'), diagnostics: typeof stderr === 'number' ? tail(stderr) : diagnostics.toString('utf8') })
+        // Also catch commands that finish between monitor ticks.
+        const reason = interrupted || interruption() || outputLimitError()
+        if (reason) { reject(new Error(reason)); return }
+        try {
+          resolve({ code: code ?? 1, output: typeof stdout === 'number' ? tail(stdout) : output.toString('utf8'), diagnostics: typeof stderr === 'number' ? tail(stderr) : diagnostics.toString('utf8') })
+        } catch (error) { reject(error) }
       })
     })
   } finally { for (const fd of handles) closeSync(fd) }
@@ -74,102 +100,123 @@ async function toolVersions() {
   return versions
 }
 
+function readJobArguments(args) {
+  const jobIndex = args.indexOf('--job')
+  const id = jobIndex >= 0 ? args[jobIndex + 1] : undefined
+  if (!id || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id)) throw new Error('Supply --job with a job UUID')
+  const timeoutIndex = args.indexOf('--timeout-ms')
+  const timeoutMs = timeoutIndex >= 0 ? Number(args[timeoutIndex + 1]) : workerConfig.analysisTimeoutMs
+  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) throw new Error('Invalid job timeout')
+  const directory = join(process.env.LEXEME_WORKER_JOBS ?? workerConfig.jobsRoot, id)
+  return { id, timeoutMs, directory, sourceRoot: resolve(directory, 'input', 'source'),
+    workRoot: join(directory, 'work'), output: join(directory, 'output') }
+}
+
+function projectPath(value, sourceRoot) {
+  if (typeof value !== 'string' || !value || value.includes('\\') || value.includes('\0') || value.includes(':') || value.startsWith('/') || value.split('/').includes('..')) {
+    throw new Error('Invalid project-relative path')
+  }
+  const path = resolve(sourceRoot, value)
+  if (path !== sourceRoot && !path.startsWith(sourceRoot + sep)) throw new Error('Path escapes source directory')
+  return path
+}
+
+async function readRequest(job) {
+  const request = JSON.parse(await readFile(join(job.directory, 'input', 'request.json'), 'utf8'))
+  if (request.schemaVersion !== 1 || request.jobId !== job.id || request.operation !== 'analyze' || request.languageStandard !== 'c11') {
+    throw new Error('Unsupported request protocol')
+  }
+  if (!Number.isSafeInteger(request.errorTailBytes) || request.errorTailBytes < 1) throw new Error('Invalid diagnostic limit')
+  if (!Number.isSafeInteger(request.artifactBytes) || request.artifactBytes < 1) throw new Error('Invalid artifact limit')
+  return request
+}
+
+async function resolveCommands(request, job, progress) {
+  if (request.entryFile !== undefined) {
+    const entry = projectPath(request.entryFile, job.sourceRoot)
+    if (!entry.endsWith('.c')) throw new Error('Entry file must be C source')
+    if (!Array.isArray(request.includeDirs) || !Array.isArray(request.defines)) throw new Error('Invalid compiler settings')
+    const flags = ['-std=c11', ...request.includeDirs.flatMap(dir => ['-I', projectPath(dir, job.sourceRoot)])]
+    for (const define of request.defines) {
+      if (typeof define !== 'string' || define.length > 256 || !/^[A-Za-z_]\w*(=[^\r\n\0]*)?$/.test(define)) throw new Error('Invalid macro definition')
+      flags.push(`-D${define}`)
+    }
+    return [{ args: ['gcc', ...flags, entry], directory: job.sourceRoot, file: entry }]
+  }
+
+  progress('configuring-cmake')
+  const build = join(job.workRoot, 'build')
+  const databasePath = join(build, 'compile_commands.json')
+  const configured = await execute('cmake', [
+    '-S', job.sourceRoot, '-B', build, '-G', 'Unix Makefiles',
+    '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON', '-DCMAKE_UNITY_BUILD=OFF',
+  ], undefined, { watchFiles: [databasePath] })
+  if (configured.code !== 0) throw new Error(configured.diagnostics || configured.output || 'CMake configuration failed')
+  const commandsPath = join(job.workRoot, 'commands.json')
+  const converted = await execute('python3', [
+    fileURLToPath(new URL('./compile_commands.py', import.meta.url)), databasePath, commandsPath,
+  ], undefined, { watchFiles: [commandsPath] })
+  if (converted.code !== 0) throw new Error(converted.diagnostics || 'Cannot read CMake compilation commands')
+  const commands = JSON.parse(await readArtifact(commandsPath, artifactBytes))
+  if (commands.length === 0) throw new Error('CMake project has no C translation units')
+  return commands
+}
+
+async function analyzeCommands(commands, request, job, progress) {
+  const units = []
+  // Normalize and deduplicate before creating unit directories or running GCC.
+  for (const [index, command] of uniqueCommands(commands).entries()) {
+    units.push(await analyzeUnit(command, index, {
+      sourceRoot: job.sourceRoot, workRoot: job.workRoot, output: job.output,
+      single: request.entryFile !== undefined, maxBytes: artifactBytes,
+    }, execute, progress))
+  }
+  return units
+}
+
+async function writeJson(output, filename, value, maxBytes = Infinity) {
+  const json = JSON.stringify(value, null, 2)
+  if (Buffer.byteLength(json) > maxBytes) throw new Error(`${filename} exceeds configured artifact byte limit`)
+  await writeFile(join(output, filename + '.tmp'), json)
+  await rename(join(output, filename + '.tmp'), join(output, filename))
+}
+
+async function runJob(job) {
+  control = { cancelPath: join(job.directory, 'cancel'), deadline: Date.now() + job.timeoutMs }
+  let stage = 'validating'
+  const progress = value => { stage = value; console.log(JSON.stringify({ type: 'progress', stage })) }
+  await mkdir(job.output, { recursive: true })
+  let result
+  try {
+    progress('validating')
+    const request = await readRequest(job)
+    errorTailBytes = request.errorTailBytes
+    artifactBytes = request.artifactBytes
+    const commands = await resolveCommands(request, job, progress)
+    const tools = await toolVersions()
+    const units = await analyzeCommands(commands, request, job, progress)
+    progress('writing-graphs')
+    await writeJson(job.output, 'graphs.json', assembleGraphs(units, tools), artifactBytes)
+    result = {
+      schemaVersion: 1, jobId: job.id, status: 'succeeded',
+      artifacts: [{ kind: 'graphs', path: 'graphs.json' }, ...units.map(unit => unit.artifact)],
+      diagnostics: units.flatMap(unit => unit.diagnostics),
+    }
+  } catch (error) {
+    result = { schemaVersion: 1, jobId: job.id, status: 'failed', artifacts: [], diagnostics: [{ stage, message: String(error.message ?? error) }] }
+    process.exitCode = 1
+  }
+  await writeJson(job.output, 'result.json', result)
+}
+
 if (process.argv.includes('--serve')) {
   // Keep this job's container alive for dependency installation and worker exec.
   // AnalysisService removes the container when the job finishes.
-  const heartbeat = setInterval(() => {}, 60_000)
+  const heartbeat = setInterval(() => {}, workerConfig.heartbeatIntervalMs)
   for (const signal of ['SIGTERM', 'SIGINT']) process.once(signal, () => clearInterval(heartbeat))
   console.log(JSON.stringify({ type: 'ready', schemaVersion: 1 }))
 } else if (process.argv.includes('--self-check')) {
   console.log(JSON.stringify({ schemaVersion: 1, graphProtocol: 1, node: process.version, tools: await toolVersions() }))
 } else {
-  const jobIndex = process.argv.indexOf('--job')
-  const id = jobIndex >= 0 ? process.argv[jobIndex + 1] : undefined
-  if (!id || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(id)) throw new Error('Supply --job with a job UUID')
-  const timeoutIndex = process.argv.indexOf('--timeout-ms')
-  const timeoutMs = timeoutIndex >= 0 ? Number(process.argv[timeoutIndex + 1]) : 60_000
-  if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 600_000) throw new Error('Invalid job timeout')
-  const jobDir = join(process.env.LEXEME_WORKER_JOBS ?? '/jobs', id)
-  const input = join(jobDir, 'input')
-  const output = join(jobDir, 'output')
-  control = { cancelPath: join(jobDir, 'cancel'), deadline: Date.now() + timeoutMs }
-  const sourceRoot = resolve(input, 'source')
-  let jobId = 'unknown'
-  let stage = 'validating'
-  const progress = value => { stage = value; console.log(JSON.stringify({ type: 'progress', stage })) }
-  const projectPath = value => {
-    if (typeof value !== 'string' || !value || value.includes('\\') || value.includes('\0') || value.includes(':') || value.startsWith('/') || value.split('/').includes('..')) {
-      throw new Error('Invalid project-relative path')
-    }
-    const path = resolve(sourceRoot, value)
-    if (path !== sourceRoot && !path.startsWith(sourceRoot + sep)) throw new Error('Path escapes source directory')
-    return path
-  }
-  await mkdir(output, { recursive: true })
-  let result
-  try {
-    progress('validating')
-    const request = JSON.parse(await readFile(join(input, 'request.json'), 'utf8'))
-    if (request.schemaVersion !== 1 || request.jobId !== id || request.operation !== 'analyze' || request.languageStandard !== 'c11') {
-      throw new Error('Unsupported request protocol')
-    }
-    jobId = request.jobId
-    if (!Number.isSafeInteger(request.errorTailBytes) || request.errorTailBytes < 1) throw new Error('Invalid diagnostic limit')
-    errorTailBytes = request.errorTailBytes
-    if (!Number.isSafeInteger(request.artifactBytes) || request.artifactBytes < 1) throw new Error('Invalid artifact limit')
-    artifactBytes = request.artifactBytes
-    let commands
-    if (request.entryFile === undefined) {
-      progress('configuring-cmake')
-      const build = join(jobDir, 'work', 'build')
-      const configured = await execute('cmake', [
-        '-S', sourceRoot, '-B', build, '-G', 'Unix Makefiles',
-        '-DCMAKE_EXPORT_COMPILE_COMMANDS=ON', '-DCMAKE_UNITY_BUILD=OFF',
-      ])
-      if (configured.code !== 0) throw new Error(configured.diagnostics || configured.output || 'CMake configuration failed')
-      const commandsPath = join(jobDir, 'work', 'commands.json')
-      const converted = await execute('python3', [
-        fileURLToPath(new URL('./compile_commands.py', import.meta.url)),
-        join(build, 'compile_commands.json'), commandsPath,
-      ])
-      if (converted.code !== 0) throw new Error(converted.diagnostics || 'Cannot read CMake compilation commands')
-      commands = JSON.parse(await readFile(commandsPath, 'utf8'))
-      if (commands.length === 0) throw new Error('CMake project has no C translation units')
-    } else {
-      const entry = projectPath(request.entryFile)
-      if (!entry.endsWith('.c')) throw new Error('Entry file must be C source')
-      if (!Array.isArray(request.includeDirs) || !Array.isArray(request.defines)) throw new Error('Invalid compiler settings')
-      const flags = ['-std=c11', ...request.includeDirs.flatMap(dir => ['-I', projectPath(dir)])]
-      for (const define of request.defines) {
-        if (typeof define !== 'string' || define.length > 256 || !/^[A-Za-z_]\w*(=[^\r\n\0]*)?$/.test(define)) throw new Error('Invalid macro definition')
-        flags.push(`-D${define}`)
-      }
-      commands = [{ args: ['gcc', ...flags, entry], directory: sourceRoot, file: entry }]
-    }
-    const tools = await toolVersions()
-    const units = []
-    for (const [index, command] of commands.entries()) {
-      const unit = await analyzeUnit(command, index, {
-        sourceRoot, workRoot: join(jobDir, 'work'), output,
-        single: request.entryFile !== undefined, maxBytes: artifactBytes,
-      }, execute, progress)
-      if (!units.some(previous => previous.unit.id === unit.unit.id)) units.push(unit)
-    }
-    progress('writing-graphs')
-    const graphs = JSON.stringify(assembleGraphs(units, tools), null, 2)
-    if (Buffer.byteLength(graphs) > artifactBytes) throw new Error('Graph JSON exceeds configured artifact byte limit')
-    await writeFile(join(output, 'graphs.json.tmp'), graphs)
-    await rename(join(output, 'graphs.json.tmp'), join(output, 'graphs.json'))
-    const artifacts = [{ kind: 'graphs', path: 'graphs.json' }, ...units.map(unit => unit.artifact)]
-    const diagnostics = units.flatMap(unit => unit.diagnostics)
-    result = {
-      schemaVersion: 1, jobId, status: 'succeeded',
-      artifacts, diagnostics,
-    }
-  } catch (error) {
-    result = { schemaVersion: 1, jobId, status: 'failed', artifacts: [], diagnostics: [{ stage, message: String(error.message ?? error) }] }
-    process.exitCode = 1
-  }
-  await writeFile(join(output, 'result.json.tmp'), JSON.stringify(result, null, 2))
-  await rename(join(output, 'result.json.tmp'), join(output, 'result.json'))
+  await runJob(readJobArguments(process.argv.slice(2)))
 }

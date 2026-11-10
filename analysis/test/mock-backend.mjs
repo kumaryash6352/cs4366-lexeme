@@ -46,13 +46,14 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
 }
 
 export function getAnalysisRequest(project = {
-  projectDir: fileURLToPath(new URL('./project/', import.meta.url)),
-  dependencies: ['zlib1g-dev'],
+  projectDir: fileURLToPath(new URL('../../../cJSON/', import.meta.url)),
+  // dependencies: ['zlib1g-dev'],
 }) {
   return {
-    schemaVersion: 1,
-    operation: 'parse',
-    projectDir: resolve(project.projectDir),
-    dependencies: project.dependencies ?? [],
-  }
+  schemaVersion: 1,
+  operation: 'parse',
+  projectDir: resolve(project.projectDir),
+  entryFile: 'cJSON.c',
+  dependencies: project.dependencies ?? [],
+  } 
 }

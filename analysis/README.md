@@ -99,6 +99,15 @@ Worker stdout and stderr stream to `worker.log` with backpressure. Space is rese
 within the file budget for a truncation marker; output beyond that budget is drained
 and discarded. Short diagnostic tails remain available separately for errors.
 
+Worker-specific defaults live in [worker/config.mjs](worker/config.mjs): the jobs
+directory, initial diagnostic/artifact budgets, default analysis timeout, cancellation
+polling interval, process termination grace period, and container heartbeat interval.
+The host's `runtime.config.json` remains authoritative for submitted job byte budgets:
+the worker requires and validates those limits in the staged request before using them.
+`--timeout-ms` overrides the worker timeout default, and `LEXEME_WORKER_JOBS` overrides
+the jobs directory. Protocol versions and per-job cancellation/deadline state remain
+in code. The worker config is included in the image and in the local-development mount.
+
 ## Graph output
 
 `output/graphs.json` contains `schemaVersion: 1`, tool versions,
