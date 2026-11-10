@@ -194,12 +194,12 @@ export default function App() {
     pendingSelection.current = null
   }, [activeFile, currentFile])
 
-  async function analyzeProject() {
+  async function analyzeProject(workspaceName = projectName, workspaceFiles = files) {
     setIsAnalyzing(true)
     setAnalysisError('')
     setAnalysisResult(null)
     try {
-      const opened = await openWorkspace(projectName, files)
+      const opened = await openWorkspace(workspaceName, workspaceFiles)
       setAnalysisResult(opened.analysis)
       if (opened.analysis.status === 'failed') setAnalysisError(opened.analysis.error)
     } catch (error) {
@@ -218,16 +218,27 @@ export default function App() {
     setAnalysisResult(null)
   }
 
-  async function importFiles(selectedFiles: FileList | null) {
+  async function importFiles(selectedFiles: FileList | null, replaceWorkspace = false) {
     if (!selectedFiles) return
     const selected = Array.from(selectedFiles)
     const root = selected.find(file => file.webkitRelativePath)?.webkitRelativePath.split('/')[0]
-    if (root) setProjectName(root)
     const importedFiles: SourceFile[] = await Promise.all(selected.map(async file => {
       const parts = file.webkitRelativePath.split('/').filter(Boolean)
       const path = parts.length > 1 ? parts.slice(1).join('/') : file.name
       return { name: file.name, path, content: await file.text() }
     }))
+    if (!importedFiles.length) return
+    const firstFile = importedFiles.find(file => /(^|\/)main\.c$/i.test(file.path)) ??
+      importedFiles.find(file => /\.[ch]$/i.test(file.path)) ?? importedFiles[0]
+    if (!firstFile) return
+    if (replaceWorkspace) {
+      const importedName = root || 'Imported Repository'
+      setProjectName(importedName)
+      setFiles(importedFiles)
+      setActiveFile(firstFile.path)
+      await analyzeProject(importedName, importedFiles)
+      return
+    }
     setFiles(previous => {
       const updated = [...previous]
       for (const imported of importedFiles) {
@@ -237,7 +248,7 @@ export default function App() {
       }
       return updated
     })
-    if (importedFiles[0]) setActiveFile(importedFiles[0].path)
+    setActiveFile(firstFile.path)
     setAnalysisResult(null)
   }
 
@@ -317,7 +328,7 @@ export default function App() {
           }} /></label>
           <label>Import Folder<input type="file" multiple
             {...({ webkitdirectory: '' } as InputHTMLAttributes<HTMLInputElement>)} onChange={event => {
-              void importFiles(event.target.files); event.target.value = ''
+              void importFiles(event.target.files, true); event.target.value = ''
             }} /></label>
         </div>
 
