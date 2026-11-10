@@ -19,7 +19,7 @@ export default function App() {
   const [activeFile, setActiveFile] = useState<SourceFile>({ path: 'main.c', content: starter })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
-  const [, setAnalysis] = useState<ProjectAnalysis | null>(null)
+  const [analysis, setAnalysis] = useState<ProjectAnalysis | null>(null)
 
   useEffect(() => {
     let mounted = true
@@ -88,7 +88,9 @@ export default function App() {
             onChange={event => setActiveFile(current => ({ ...current, content: event.target.value }))}
             spellCheck={false} aria-label={`${activeFile.path} source code`} />
         </section>
-        <GraphWorkspace key={project?.id ?? 'scratch'} {...(project ? { projectName: project.name } : {})} />
+        <GraphWorkspace key={project?.id ?? 'scratch'}
+          {...(project ? { projectName: project.name } : {})}
+          {...(analysis ? { analysis } : {})} />
       </div>
       <footer><span>{project ? `${project.name} · active project` : 'No repository open'}</span><span>{lineCount} lines · React + TypeScript</span></footer>
     </main>
