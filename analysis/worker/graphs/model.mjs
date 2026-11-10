@@ -16,7 +16,7 @@ export function stageFlags(command) {
   for (let i = 1; i < command.args.length; i++) {
     const arg = command.args[i]
     if (['-o', '-MF', '-MT', '-MQ', '-MJ', '-dumpbase', '-dumpdir'].includes(arg)) { i++; continue }
-    if (['-c', '-S', '-E', '-fsyntax-only', '-MD', '-MMD', '-MP', '-M', '-MM'].includes(arg) ||
+    if (['-c', '-S', '-E', '-fsyntax-only', '-MD', '-MMD', '-MP', '-MG', '-M', '-MM'].includes(arg) ||
         /^(-o.|-MF.|-MT.|-MQ.|-MJ.|-fdump-|-save-temps)/.test(arg)) continue
     if (!arg.startsWith('-') && resolve(command.directory, arg) === resolve(command.directory, command.file)) continue
     if (arg.startsWith('@')) throw new Error('Compiler response files are not supported by graph analysis yet')
@@ -25,11 +25,32 @@ export function stageFlags(command) {
   return flags
 }
 
+/** Ignore build output names, but retain different compilers, flags, and directories. */
+export function uniqueCommands(commands) {
+  const seen = new Set()
+  const unique = []
+  for (const command of commands) {
+    const directory = resolve(command.directory)
+    const file = resolve(directory, command.file)
+    const normalized = { args: [command.args[0], ...stageFlags(command), file], directory, file }
+    const key = JSON.stringify(normalized)
+    if (seen.has(key)) continue
+    seen.add(key)
+    unique.push(normalized)
+  }
+  return unique
+}
+
 function cfgFlags(flags) {
   const result = []
   // Preprocessing has already happened with the original build's macros/settings.
   for (let i = 0; i < flags.length; i++) {
     const arg = flags[i]
+    if (arg === '-Werror') continue
+    if (arg.startsWith('-Werror=')) {
+      result.push(`-W${arg.slice('-Werror='.length)}`)
+      continue
+    }
     if (['-I', '-D', '-U', '-include', '-imacros', '-isystem', '-iquote', '-idirafter', '-iprefix', '-iwithprefix', '-iwithprefixbefore', '-x'].includes(arg)) { i++; continue }
     if (/^(-[IDU].|-O|-flto|-fwhole-program|-Wp,|-include.|-imacros.)/.test(arg)) continue
     result.push(arg)
@@ -52,7 +73,8 @@ export async function analyzeUnit(command, index, paths, execute, progress) {
     throw new Error(`Graph analysis requires GCC; unsupported compiler: ${compiler}`)
   }
   const run = async (program, args, options = {}) => {
-    const result = await execute(program, args, command.directory, options)
+    // GCC writes -o outputs and version-dependent dump filenames directly here.
+    const result = await execute(program, args, command.directory, { ...options, watchDirectories: [work] })
     if (result.code !== 0) throw new Error(result.diagnostics || result.output || `${program} failed (${result.code})`)
     if (!options.stderrFile && result.diagnostics.trim()) diagnostics.push({ stage: `${basename(program)}-warning`, message: result.diagnostics.trim() })
     return result
@@ -69,8 +91,12 @@ export async function analyzeUnit(command, index, paths, execute, progress) {
 
   progress('extracting-cfg')
   const objectPath = join(work, 'unit.o')
-  await run(compiler, [...cfgFlags(flags), '-O0', '-x', 'cpp-output', '-c', preprocessedPath,
-    '-fdump-tree-cfg-graph-lineno', '-fdump-ipa-cgraph', '-o', objectPath])
+  await run(compiler, [
+    ...cfgFlags(flags), '-Wno-error', '-O0',
+    '-x', 'cpp-output', '-c', preprocessedPath,
+    '-fdump-tree-cfg-graph-lineno', '-fdump-ipa-cgraph',
+    '-o', objectPath,
+  ])
   const symbolsPath = join(work, 'symbols.txt')
   await run('nm', ['--defined-only', '--format=posix', objectPath], { stdoutFile: symbolsPath })
   const symbols = await readArtifact(symbolsPath, maxBytes)
