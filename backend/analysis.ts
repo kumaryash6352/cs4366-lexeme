@@ -1,4 +1,5 @@
-import { readFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname, resolve } from 'node:path'
 import { AnalysisService } from '#analysis'
 import type { GraphDocument as AnalyzerGraphDocument } from '#analysis'
 import type { GraphDocument, ProjectAnalysis } from '../shared/analysis.ts'
@@ -22,6 +23,7 @@ function graphDocument(value: unknown): GraphDocument {
 
 export class ContainerAnalysisRunner implements AnalysisRunner {
   private service = new AnalysisService()
+  private latestGraphPath = resolve(process.env.LEXEME_ANALYSIS_OUTPUT ?? 'analysis/latest-graphs.json')
 
   start(): Promise<void> {
     return this.service.start((stage, message) => console.info(`[analysis:${stage}] ${message}`))
@@ -46,9 +48,14 @@ export class ContainerAnalysisRunner implements AnalysisRunner {
     }
     const path = this.service.artifactPath(completed.id)
     if (!path) throw new Error('Successful analysis did not provide graphs.json.')
+    const contents = await readFile(path, 'utf8')
+    const graph = graphDocument(JSON.parse(contents))
+    await mkdir(dirname(this.latestGraphPath), { recursive: true })
+    await writeFile(this.latestGraphPath, `${JSON.stringify(graph, null, 2)}\n`)
+    console.info(`[analysis:output] ${this.latestGraphPath}`)
     return {
       status: 'succeeded', jobId: completed.id, mode, events: completed.events, diagnostics,
-      graph: graphDocument(JSON.parse(await readFile(path, 'utf8'))),
+      graph,
     }
   }
 

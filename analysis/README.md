@@ -75,6 +75,11 @@ Both single-file forms use C11 and produce `graphs.json` plus `main.i`.
 `artifactPath(id)` returns `graphs.json`; pass an artifact path as the second
 argument to select a preprocessed source instead.
 
+The application backend also writes the most recent successful graph document to
+`analysis/latest-graphs.json` for local inspection. Set `LEXEME_ANALYSIS_OUTPUT`
+to use a different path. This inspection file is replaced after each successful
+analysis and is ignored by Git.
+
 ## Limits and logs
 
 Adjust budgets in `runtime.config.json`; the service reads it once at construction.
@@ -108,9 +113,10 @@ is exported as `GraphDocument` from [src/contracts.ts](src/contracts.ts).
 
 Each CFG has entry, exit, and basic-block nodes. Edges represent execution flow,
 including true/false branches and switch destinations where GCC supplies them.
-Invisible DOT layout edges are excluded. Node locations identify original source
-files; `compiler` positions are GCC locations, not guaranteed exact statement
-ranges, especially for macros. Function locations use available CFG locations. Exact
+Invisible DOT layout edges are excluded. Tree-sitter maps GCC locations back to
+original C syntax and adds readable labels, semantic kinds, exact source spans,
+and the original GCC label as `rawLabel`. Blocks that cannot be mapped retain their
+compiler label. Function locations use available CFG locations. Exact
 call-site spans and statement-level UI highlighting are not implemented.
 
 Calls come from GCC's initial call graph, before unused functions are removed.

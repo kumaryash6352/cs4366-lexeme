@@ -28,3 +28,6 @@ dist-electron
 dist-backend
 *.tsbuildinfo
 electron/*.js
+
+# Latest local analyzer output
+analysis/latest-graphs.json
