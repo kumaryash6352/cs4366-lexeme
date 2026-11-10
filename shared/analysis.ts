@@ -13,6 +13,15 @@ export interface GraphEdge {
   label?: string
 }
 
+export interface SourceSpan {
+  file: string
+  startLine: number
+  startColumn: number
+  endLine: number
+  endColumn: number
+  text: string
+}
+
 /** Versioned graph artifact returned by the backend and accepted by the frontend. */
 export interface GraphDocument {
   schemaVersion: 1
@@ -53,6 +62,11 @@ export interface GraphDocument {
       kind: 'entry' | 'exit' | 'block'
       label: string
       locations: SourceLocation[]
+      /** Source-oriented metadata added by Tree-sitter when a compiler location can be matched. */
+      semanticKind?: 'statement' | 'condition' | 'loop' | 'return' | 'call' | 'declaration' | 'jump'
+      source?: SourceSpan
+      sourceSpans?: SourceSpan[]
+      rawLabel?: string
     }[]
     edges: GraphEdge[]
   }[]

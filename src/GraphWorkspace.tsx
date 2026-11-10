@@ -163,10 +163,10 @@ export function GraphWorkspace({ projectName, analysis }: { projectName?: string
           <g className="cfg-nodes">
             {diagram.nodes.map(node => {
               const lines = nodeLines(node.label)
-              const location = node.locations[0]
+              const location = node.source ? { file: node.source.file, line: node.source.startLine } : node.locations[0]
               return <g key={node.id} className={`cfg-node ${node.kind}`} transform={`translate(${node.x} ${node.y})`}>
                 <rect width={NODE_WIDTH} height={NODE_HEIGHT} rx="10" />
-                <text className="cfg-node-kind" x="14" y="20">{node.kind}</text>
+                <text className="cfg-node-kind" x="14" y="20">{node.semanticKind ?? node.kind}</text>
                 <text className="cfg-node-label" x="14" y="42">{lines.map((line, index) => <tspan key={index} x="14" dy={index ? 16 : 0}>{line}</tspan>)}</text>
                 {location && <text className="cfg-node-location" x="14" y="100">{location.file}:{location.line}</text>}
               </g>

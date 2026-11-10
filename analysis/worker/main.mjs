@@ -97,6 +97,10 @@ async function toolVersions() {
     if (result.code !== 0) throw new Error(`${program} is unavailable`)
     versions[program] = result.output.split('\n')[0]
   }
+  for (const packageName of ['tree-sitter', 'tree-sitter-c']) {
+    const manifest = JSON.parse(await readFile(fileURLToPath(new URL(`../node_modules/${packageName}/package.json`, import.meta.url)), 'utf8'))
+    versions[packageName] = manifest.version
+  }
   return versions
 }
 

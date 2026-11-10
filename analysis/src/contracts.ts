@@ -154,6 +154,7 @@ export interface SourceLocation {
   precision: 'line' | 'compiler'
 }
 export interface GraphEdge { source: string; target: string; kind: string; label?: string }
+export interface SourceSpan { file: string; startLine: number; startColumn: number; endLine: number; endColumn: number; text: string }
 export interface GraphDocument {
   schemaVersion: 1
   tools: Record<string, string>
@@ -167,7 +168,9 @@ export interface GraphDocument {
   }
   controlFlow: {
     functionId: string; unitId: string
-    nodes: { id: string; kind: 'entry' | 'exit' | 'block'; label: string; locations: SourceLocation[] }[]
+    nodes: { id: string; kind: 'entry' | 'exit' | 'block'; label: string; locations: SourceLocation[];
+      semanticKind?: 'statement' | 'condition' | 'loop' | 'return' | 'call' | 'declaration' | 'jump';
+      source?: SourceSpan; sourceSpans?: SourceSpan[]; rawLabel?: string }[]
     edges: GraphEdge[]
   }[]
   limitations: string[]
