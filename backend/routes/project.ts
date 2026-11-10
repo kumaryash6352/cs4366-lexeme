@@ -9,7 +9,9 @@ export async function projectRoutes(app: FastifyInstance, options: { store: Proj
     const directory = options.store.activeDirectory
     if (!directory) throw new Error('The active project was not staged for analysis.')
     const hasCMake = project.files.some(file => file.path === 'CMakeLists.txt')
-    const entryFile = hasCMake ? undefined : project.files.find(file => /\.c$/i.test(file.path))?.path
+    const entryFile = hasCMake ? undefined :
+      (project.files.find(file => /(^|\/)main\.c$/i.test(file.path)) ??
+        project.files.find(file => /\.c$/i.test(file.path)))?.path
     if (!hasCMake && !entryFile) throw new Error('Analysis requires a root CMakeLists.txt or at least one C source file.')
     const analysis = await options.analysis.analyze(directory, entryFile)
     return { project, analysis }
