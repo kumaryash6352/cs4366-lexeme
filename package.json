@@ -3,11 +3,13 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "imports": {
+    "#analysis": "./analysis/dist/index.js"
+  },
   "scripts": {
-    "dev": "tsc -p tsconfig.electron.json && node scripts/dev.mjs",
+    "dev": "tsc -p analysis/tsconfig.json && tsc -p tsconfig.electron.json && node scripts/dev.mjs",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "test:project": "tsc -p backend/tsconfig.json && node --test backend/project.test.mjs",
     "preview": "vite preview",
     "dev:web": "node scripts/dev-web.mjs",
     "start": "electron .",

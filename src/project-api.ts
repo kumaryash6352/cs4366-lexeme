@@ -1,5 +1,5 @@
 import { isIgnoredPath, isSourceFile, PROJECT_LIMITS } from '../shared/project.ts'
-import type { Project, ProjectUpload, SourceFile } from '../shared/project.ts'
+import type { OpenProjectResponse, Project, ProjectUpload, SourceFile } from '../shared/project.ts'
 
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   let response: Response
@@ -21,7 +21,7 @@ function base64(file: File): Promise<string> {
   })
 }
 
-export async function openRepository(selection: File[]): Promise<Project> {
+export async function openRepository(selection: File[]): Promise<OpenProjectResponse> {
   const rootName = selection[0]?.webkitRelativePath.split('/')[0]
   if (!rootName) throw new Error('Choose a repository folder containing C source files.')
   const files = selection.map(file => {
@@ -37,7 +37,7 @@ export async function openRepository(selection: File[]): Promise<Project> {
   const upload: ProjectUpload = { name: rootName, files: [] }
   // Read sequentially so a large selection does not start hundreds of FileReaders.
   for (const { file, path } of files) upload.files.push({ path, content: await base64(file) })
-  return request<Project>('/api/project', {
+  return request<OpenProjectResponse>('/api/project', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(upload),
   })
 }

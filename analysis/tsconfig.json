@@ -6,6 +6,7 @@
     "noEmit": false,
     "allowImportingTsExtensions": false,
     "incremental": true,
+    "composite": true,
     "declaration": true,
     "tsBuildInfoFile": "./.cache/tsconfig.tsbuildinfo"
   },

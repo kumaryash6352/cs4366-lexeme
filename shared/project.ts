@@ -1,3 +1,5 @@
+import type { ProjectAnalysis } from './analysis.ts'
+
 export const PROJECT_LIMITS = { files: 1000, bytes: 10 * 1024 * 1024, depth: 32 } as const
 
 export interface ProjectUpload {
@@ -12,6 +14,12 @@ export interface Project {
   name: string
   files: ProjectFile[]
   initialFile: SourceFile
+}
+
+/** Response to opening a repository. Analysis is complete when this response arrives. */
+export interface OpenProjectResponse {
+  project: Project
+  analysis: ProjectAnalysis
 }
 
 export function isSourceFile(path: string): boolean {

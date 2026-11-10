@@ -1,9 +1,11 @@
 import { spawn } from 'node:child_process'
 import { createServer } from 'vite'
 
-const compile = spawn(process.execPath, ['node_modules/typescript/bin/tsc', '-p', 'backend/tsconfig.json'], { stdio: 'inherit' })
-const compileCode = await new Promise(resolve => compile.once('exit', resolve))
-if (compileCode !== 0) process.exit(compileCode ?? 1)
+for (const config of ['analysis/tsconfig.json', 'backend/tsconfig.json']) {
+  const compile = spawn(process.execPath, ['node_modules/typescript/bin/tsc', '-p', config], { stdio: 'inherit' })
+  const compileCode = await new Promise(resolve => compile.once('exit', resolve))
+  if (compileCode !== 0) process.exit(compileCode ?? 1)
+}
 
 const backend = spawn(process.execPath, ['dist-backend/backend/server.js'], { stdio: 'inherit' })
 const frontend = await createServer({ server: { host: '127.0.0.1', port: 5173, strictPort: true } })

@@ -4,6 +4,7 @@ import { GraphWorkspace } from './GraphWorkspace.tsx'
 import { getProject, openRepository, readSource } from './project-api.ts'
 import { isSourceFile } from '../shared/project.ts'
 import type { Project, SourceFile } from '../shared/project.ts'
+import type { ProjectAnalysis } from '../shared/analysis.ts'
 import './App.css'
 
 const starter = `#include <stdio.h>\n\nint main(void) {\n    puts("Hello, Lexeme!");\n    return 0;\n}\n`
@@ -18,6 +19,7 @@ export default function App() {
   const [activeFile, setActiveFile] = useState<SourceFile>({ path: 'main.c', content: starter })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [, setAnalysis] = useState<ProjectAnalysis | null>(null)
 
   useEffect(() => {
     let mounted = true
@@ -33,8 +35,9 @@ export default function App() {
     setError('')
     try {
       const opened = await openRepository(Array.from(files))
-      setProject(opened)
-      setActiveFile(opened.initialFile)
+      setProject(opened.project)
+      setActiveFile(opened.project.initialFile)
+      setAnalysis(opened.analysis)
     } catch (reason) {
       setError(message(reason))
     } finally {
