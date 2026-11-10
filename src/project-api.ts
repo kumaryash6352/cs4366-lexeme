@@ -21,6 +21,31 @@ function base64(file: File): Promise<string> {
   })
 }
 
+function textBase64(content: string): string {
+  const bytes = new TextEncoder().encode(content)
+  let binary = ''
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+  }
+  return btoa(binary)
+}
+
+/** Submit the editable in-browser workspace through the same project contract as a folder upload. */
+export async function openWorkspace(name: string, workspaceFiles: { path: string; content: string }[]): Promise<OpenProjectResponse> {
+  const files = workspaceFiles.filter(file => !isIgnoredPath(file.path))
+  if (!files.some(file => isSourceFile(file.path))) throw new Error('The workspace must contain at least one .c or .h file.')
+  if (files.length > PROJECT_LIMITS.files) throw new Error('The workspace exceeds the 1,000-file upload limit.')
+  const size = files.reduce((total, file) => total + new TextEncoder().encode(file.content).length, 0)
+  if (size > PROJECT_LIMITS.bytes) throw new Error('The workspace exceeds the 10 MiB upload limit.')
+  const upload: ProjectUpload = {
+    name: name.trim() || 'Lexeme Project',
+    files: files.map(file => ({ path: file.path, content: textBase64(file.content) })),
+  }
+  return request<OpenProjectResponse>('/api/project', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(upload),
+  })
+}
+
 export async function openRepository(selection: File[]): Promise<OpenProjectResponse> {
   const rootName = selection[0]?.webkitRelativePath.split('/')[0]
   if (!rootName) throw new Error('Choose a repository folder containing C source files.')
