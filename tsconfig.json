@@ -2,6 +2,12 @@
   "files": [],
   "references": [
     {
+      "path": "./analysis/tsconfig.json"
+    },
+    {
+      "path": "./backend/tsconfig.json"
+    },
+    {
       "path": "./tsconfig.app.json"
     },
     {
