@@ -1,147 +1,98 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import type { InputHTMLAttributes } from 'react'
+import { GraphWorkspace } from './GraphWorkspace.tsx'
+import { getProject, openRepository, readSource } from './project-api.ts'
+import { isSourceFile } from '../shared/project.ts'
+import type { Project, SourceFile } from '../shared/project.ts'
+import type { ProjectAnalysis } from '../shared/analysis.ts'
 import './App.css'
 
-const example = `
-#include <stdio.h>
-#include <stdlib.h>
+const starter = `#include <stdio.h>\n\nint main(void) {\n    puts("Hello, Lexeme!");\n    return 0;\n}\n`
 
-int calculate(int *a, int *b);
-
-int main(void) {
-    int *a = malloc(sizeof(int));
-    int *b = malloc(sizeof(int));
-
-    if (a == NULL || b == NULL) {
-        free(a);
-        free(b);
-        return 1;
-    }
-
-    printf("Please enter the value for a: ");
-    if (scanf("%d", a) != 1) {
-        free(a);
-        free(b);
-        return 1;
-    }
-
-    printf("Please enter the value for b: ");
-    if (scanf("%d", b) != 1) {
-        free(a);
-        free(b);
-        return 1;
-    }
-
-    int result = calculate(a, b);
-    printf("\nThe result is: %d\n", result);
-
-    free(a);
-    free(b);
-    return 0;
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : 'The repository could not be opened.'
 }
-
-int calculate(int *a, int *b) {
-    return *a + *b;
-}
-`
-
-
-import * as d3 from "https://cdn.jsdelivr.net/npm/d3@7/+esm";
-
-type Node = {
-	name: string;
-	kind: 'statement' | 'conditional' | 'loop';
-	file: string;
-	index: number;
-	children?: Node[];
-};
-const graphExample : Node = {name: "Start", kind:'statement', children:[{name: "something something", kind:'statement', children:[{name: "End", kind:'statement', children:null}]}]}
-
-const isPanning = false;
-const flowchart_viewbox = {x:0, y:0, zoom:1000};
-const viewboxBoundaries = {xMin: -500, xMax: 500, yMin: -500, yMax: 500, zoomMin: 10, zoomMax: 1000, elementLength: 618.5};
-
-function panViewbox(dx : number, dy : number) : void {
-	flowchart_viewbox.x -= dx * flowchart_viewbox.zoom / 1000;
-	flowchart_viewbox.y -= dy * flowchart_viewbox.zoom / 1000;
-	
-	if (viewboxBoundaries.xMin > flowchart_viewbox.x) flowchart_viewbox.x = viewboxBoundaries.xMin;
-	else if (viewboxBoundaries.xMax < flowchart_viewbox.x) flowchart_viewbox.x = viewboxBoundaries.xMax;
-	if (viewboxBoundaries.yMin > flowchart_viewbox.y) flowchart_viewbox.y = viewboxBoundaries.yMin;
-	else if (viewboxBoundaries.yMax < flowchart_viewbox.y) flowchart_viewbox.y = viewboxBoundaries.yMax;
-}
-function zoomViewbox(cx : number, cy : number, zm : number) : void {
-	zm /= 10;
-	let zmOffset = flowchart_viewbox.zoom;
-	flowchart_viewbox.zoom += zm;
-	
-	if (viewboxBoundaries.zoomMin > flowchart_viewbox.zoom) flowchart_viewbox.zoom = viewboxBoundaries.zoomMin;
-	else if (viewboxBoundaries.zoomMax < flowchart_viewbox.zoom) flowchart_viewbox.zoom = viewboxBoundaries.zoomMax;
-	zmOffset -= flowchart_viewbox.zoom;
-	
-	flowchart_viewbox.x += (cx / viewboxBoundaries.elementLength) * zmOffset;
-	flowchart_viewbox.y += (cy / viewboxBoundaries.elementLength) * zmOffset;
-	
-	if (viewboxBoundaries.xMin > flowchart_viewbox.x) flowchart_viewbox.x = viewboxBoundaries.xMin;
-	else if (viewboxBoundaries.xMax < flowchart_viewbox.x) flowchart_viewbox.x = viewboxBoundaries.xMax;
-	if (viewboxBoundaries.yMin > flowchart_viewbox.y) flowchart_viewbox.y = viewboxBoundaries.yMin;
-	else if (viewboxBoundaries.yMax < flowchart_viewbox.y) flowchart_viewbox.y = viewboxBoundaries.yMax;
-}
-
-// TO-DO list:
-// 1) (Un)Highlight hovered boxes
-// 2) Clicking boxes jumps to selection in text
-// 3) Selections jumps to boxes
-// 4) Build tree
-// 5) Allow subtree expansion (and closing)
-// 6) Allow multiple source files in tree
-// (3-5) finalize data formating
-// (...) exporting and importing
 
 export default function App() {
-  const [source, setSource] = useState(example);
-  const [selectionIndex, setSelectionIndex] = useState(0);
-  const [panning, setPanning] = useState(isPanning);
-  const [flowchartViewbox, setViewbox] = useState([flowchart_viewbox.x, flowchart_viewbox.y, flowchart_viewbox.zoom, flowchart_viewbox.zoom]);
+  const picker = useRef<HTMLInputElement>(null)
+  const [project, setProject] = useState<Project | null>(null)
+  const [activeFile, setActiveFile] = useState<SourceFile>({ path: 'main.c', content: starter })
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [analysis, setAnalysis] = useState<ProjectAnalysis | null>(null)
+
+  useEffect(() => {
+    let mounted = true
+    void getProject().then(open => {
+      if (mounted && open) { setProject(open); setActiveFile(open.initialFile) }
+    }).catch(() => {})
+    return () => { mounted = false }
+  }, [])
+
+  async function selectRepository(files: FileList | null) {
+    if (!files?.length) return
+    setBusy(true)
+    setError('')
+    try {
+      const opened = await openRepository(Array.from(files))
+      setProject(opened.project)
+      setActiveFile(opened.project.initialFile)
+      setAnalysis(opened.analysis)
+    } catch (reason) {
+      setError(message(reason))
+    } finally {
+      setBusy(false)
+      if (picker.current) picker.current.value = ''
+    }
+  }
+
+  async function selectFile(path: string) {
+    if (!project || path === activeFile.path) return
+    setError('')
+    try { setActiveFile(await readSource(project.id, path)) }
+    catch (reason) { setError(message(reason)) }
+  }
+
+  const sourceFiles = project?.files.filter(file => isSourceFile(file.path)) ?? []
+  const lineCount = activeFile.content.trimEnd().split('\n').length
   return (
-    <main className="app" onMouseUp={(event)=> setPanning(false)}>
-      <header className="toolbar noselect" >
-        <div className="brand"><span className="logo">🐟</span><h1>lexeme</h1></div>
+    <main className="app">
+      <header className="toolbar">
+        <div className="brand"><span className="logo" aria-hidden="true">◇</span><h1>lexeme</h1></div>
         <span className="subtitle">code explorer</span>
-        <span className="badge">Workspace starter</span>
+        <span className="badge">{project ? project.name : 'Local workspace'}</span>
       </header>
       <div className="workspace">
-        <section className="pane" aria-labelledby="source-title" >
+        <section className="pane source-pane" aria-labelledby="source-title">
           <div className="pane-header">
-            <h2 id="source-title" className="noselect">Source</h2>
-            <button onClick={() => setSource(example)}>Reset example</button>
+            <div><h2 id="source-title">Source</h2>{project && <span className="project-summary">{project.files.length} files</span>}</div>
+            <div className="source-actions">
+              <input ref={picker} className="visually-hidden" type="file" multiple
+                {...({ webkitdirectory: '' } as InputHTMLAttributes<HTMLInputElement>)}
+                onChange={event => { void selectRepository(event.currentTarget.files) }} />
+              <button className="primary-button" disabled={busy} onClick={() => picker.current?.click()}>
+                {busy ? <><span className="spinner" aria-hidden="true" />Opening…</> : project ? 'Open another' : 'Open repository'}
+              </button>
+            </div>
           </div>
-          <label className="file-label noselect" htmlFor="source">main.c <span>C11</span></label>
-          <textarea id="source1" value={source} onChange={(event) => setSource(event.target.value)} onSelect={(event)=> setSelectionIndex(event.target.selectionStart)} spellCheck={false} aria-label="C source code" />
+          {error && <div className="notice error-notice" role="alert">{error}</div>}
+          {!project && <div className="notice">Paste C source below or open a repository folder. Opening a repository stages one workspace for analysis.</div>}
+          {project && <div className="project-browser" aria-label={`${project.name} source files`}>
+            {sourceFiles.map(file => <button key={file.path} className={file.path === activeFile.path ? 'file-item active' : 'file-item'}
+              title={file.path} onClick={() => { void selectFile(file.path) }}>
+              <span aria-hidden="true">{file.path.endsWith('.h') ? 'H' : 'C'}</span>{file.path}
+            </button>)}
+          </div>}
+          <label className="file-label" htmlFor="source-editor"><span>{activeFile.path}</span><span>C source</span></label>
+          <textarea id="source-editor" value={activeFile.content}
+            onChange={event => setActiveFile(current => ({ ...current, content: event.target.value }))}
+            spellCheck={false} aria-label={`${activeFile.path} source code`} />
         </section>
-        <section className="pane graph-pane" aria-labelledby="graph-title">
-          <div className="pane-header noselect"><h2 id="graph-title">Graph workspace</h2><span className="muted">Control flow</span></div>
-          <div className="empty-state">
-            <div className="graph-mark noselect" aria-hidden="true">◇</div>
-            <h3 className="noselect">flowchart here</h3>
-<svg id="FLOWCHART" viewBox={flowchartViewbox}
-	onMouseDown={(event)=> setPanning(true)}
-	onMouseMove={(event)=>{if (panning) { panViewbox(event.movementX, event.movementY); setViewbox([flowchart_viewbox.x,flowchart_viewbox.y,flowchart_viewbox.zoom,flowchart_viewbox.zoom]);}}}
-	onWheel={(event)=>{if (event.ctrlKey) {zoomViewbox(event.nativeEvent.offsetX, event.nativeEvent.offsetY, event.deltaY); setViewbox([flowchart_viewbox.x,flowchart_viewbox.y,flowchart_viewbox.zoom,flowchart_viewbox.zoom]);}}}
->
-
-<g fill="gray" stroke="white" strokeWidth="1.5" x="250">
-<rect y="250" width="250" height="250" onMouseOver={(event)=> console.log("Here!")}/>
-<text className="noselect" x="250" y="250" font="30px sans-serif" >Hello</text>
-</g>
-
-</svg>
-            <p className="muted">nothing</p>
-			<textarea id="source2" value={selectionIndex} disabled />
-          </div>
-          <div className="graph-modes" aria-label="Planned graph views">Control flow · Calls · Includes · Data dependencies</div>
-        </section>
+        <GraphWorkspace key={project?.id ?? 'scratch'}
+          {...(project ? { projectName: project.name } : {})}
+          {...(analysis ? { analysis } : {})} />
       </div>
-      <footer><span>Local workspace</span><span>{source.trimEnd().split('\n').length} lines · React + TypeScript</span></footer>
+      <footer><span>{project ? `${project.name} · active project` : 'No repository open'}</span><span>{lineCount} lines · React + TypeScript</span></footer>
     </main>
   )
 }

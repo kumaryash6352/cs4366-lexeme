@@ -1,5 +1,5 @@
 // for loading code from backend
-import Fastify from 'fastify'
+import type { FastifyInstance } from 'fastify'
 
 const sampleCode = `
 #include <stdio.h>
@@ -44,7 +44,7 @@ int calculate(int *a, int *b) {
 }
 `
 
-async function loaderRoutes(fastify, options) {
+async function loaderRoutes(fastify: FastifyInstance) {
   fastify.route({
     method: 'GET',
     url: '/code',
@@ -65,11 +65,10 @@ async function loaderRoutes(fastify, options) {
         }
       }
     },
-    handler: function (request, reply) {
+    handler: function (_request, reply) {
       reply.send({ code: sampleCode })
     }
   })
 }
 
 export default loaderRoutes 
-
