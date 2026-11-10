@@ -4,6 +4,7 @@ import { filePath, stableId } from './source-map.mjs'
 import { parseIncludes } from './includes.mjs'
 import { parseCfg } from './cfg.mjs'
 import { applyLinkage, mergeCalls, parseCalls } from './calls.mjs'
+import { enrichControlFlow, SourceIndex } from './source-index.mjs'
 
 export async function readArtifact(path, maxBytes) {
   if ((await stat(path)).size > maxBytes) throw new Error(`Analysis artifact exceeds ${maxBytes} bytes: ${basename(path)}`)
@@ -80,6 +81,8 @@ export async function analyzeUnit(command, index, paths, execute, progress) {
   // A translation unit containing only declarations/data has no function CFGs.
   const cfg = dumpFiles.length ? parseCfg(await readArtifact(join(work, dumpFiles[0]), maxBytes),
     await readArtifact(join(work, dumpFiles[0] + '.dot'), maxBytes), context) : { functions: [], graphs: [] }
+  progress('enriching-source')
+  await enrichControlFlow(cfg.graphs, new SourceIndex(sourceRoot, maxBytes))
 
   progress('extracting-calls')
   const callFiles = (await readdir(work)).filter(name => name.endsWith('.cgraph'))
@@ -110,7 +113,7 @@ export function assembleGraphs(results, tools) {
     includes: { edges: includeEdges },
     calls,
     controlFlow: results.flatMap(result => result.cfg),
-    limitations: ['CFGs describe early GCC basic blocks, not exact original statement ranges.',
+    limitations: ['CFG topology describes early GCC basic blocks; Tree-sitter source spans enrich blocks but do not change compiler control flow.',
       'Graphs cover the selected preprocessing configuration. Macro source positions may be approximate.',
       'Unique external definitions are matched by name across selected units; this is not linker-level resolution.'],
   }
