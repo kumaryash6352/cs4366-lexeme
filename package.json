@@ -7,8 +7,9 @@
     "dev": "tsc -p tsconfig.electron.json && node scripts/dev.mjs",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
+    "test:project": "tsc -p backend/tsconfig.json && node --test backend/project.test.mjs",
     "preview": "vite preview",
-    "dev:web": "vite --host 127.0.0.1",
+    "dev:web": "node scripts/dev-web.mjs",
     "start": "electron .",
     "typecheck": "tsc -b"
   },
@@ -28,7 +29,7 @@
     "typescript": "~6.0.3",
     "vite": "^8.3.4"
   },
-  "main": "dist-electron/main.js",
+  "main": "dist-electron/electron/main.js",
   "engines": {
     "node": ">=22.12.0"
   }

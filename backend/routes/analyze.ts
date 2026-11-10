@@ -1,4 +1,4 @@
-import Fastify from 'fastify'
+import type { FastifyInstance } from 'fastify'
 
 const sampleGraph = `
 {
@@ -73,7 +73,7 @@ const sampleGraph = `
 }
 `
 
-async function analysisRoutes(fastify, options) {
+async function analysisRoutes(fastify: FastifyInstance) {
   fastify.route({
     method: 'GET',
     url: '/analyze',
@@ -94,7 +94,7 @@ async function analysisRoutes(fastify, options) {
         }
       }
     },
-    handler: function (request, reply) {
+    handler: function (_request, reply) {
       reply.send({ graph: sampleGraph })
     }
   })
