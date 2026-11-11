@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process'
+import { COMMAND_OUTPUT_CHARS, ERROR_TAIL_CHARS } from './limits.js'
 
 export interface CommandOptions {
   timeoutMs?: number
+  cwd?: string
   signal?: AbortSignal
   onStdout?: (text: string) => void
   onStderr?: (text: string) => void
@@ -12,7 +14,7 @@ export type Command = (program: string, args: string[], options?: CommandOptions
 // Keep bounded tails for diagnostics; stream callbacks still receive every chunk.
 export const runCommand: Command = (program, args, options = {}) => new Promise((resolve, reject) => {
   if (options.signal?.aborted) { reject(new Error('Operation cancelled')); return }
-  const child = spawn(program, args, { shell: false, stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(program, args, { shell: false, ...(options.cwd ? { cwd: options.cwd } : {}), stdio: ['ignore', 'pipe', 'pipe'] })
   let stdout = ''
   let stderr = ''
   let interrupted = ''
@@ -33,8 +35,8 @@ export const runCommand: Command = (program, args, options = {}) => new Promise(
   }
   child.stdout.setEncoding('utf8')
   child.stderr.setEncoding('utf8')
-  child.stdout.on('data', (text: string) => { stdout = (stdout + text).slice(-65536); options.onStdout?.(text) })
-  child.stderr.on('data', (text: string) => { stderr = (stderr + text).slice(-65536); options.onStderr?.(text) })
+  child.stdout.on('data', (text: string) => { stdout = (stdout + text).slice(-COMMAND_OUTPUT_CHARS); options.onStdout?.(text) })
+  child.stderr.on('data', (text: string) => { stderr = (stderr + text).slice(-COMMAND_OUTPUT_CHARS); options.onStderr?.(text) })
   child.on('error', error => { cleanup(); reject(error) })
   child.on('close', code => {
     cleanup()
@@ -44,5 +46,8 @@ export const runCommand: Command = (program, args, options = {}) => new Promise(
 })
 
 export function assertSuccess(result: CommandResult, action: string): void {
-  if (result.code !== 0) throw new Error(`${action} failed (${result.code}): ${result.stderr.trim() || result.stdout.trim()}`)
+  if (result.code !== 0) {
+    const output = (result.stderr.trim() || result.stdout.trim()).slice(-ERROR_TAIL_CHARS)
+    throw new Error(`${action} failed (${result.code}): ${output}`)
+  }
 }

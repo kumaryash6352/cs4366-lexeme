@@ -5,6 +5,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+# Analyzer runtime dependencies (Tree-sitter runs as WebAssembly; no native build).
+COPY image/package.json image/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+# Compiled analyzer (npm run build:analysis) and the job worker.
+COPY dist/analyzer/ ./analyzer/
 COPY worker/ ./worker/
 ENTRYPOINT ["node", "/app/worker/main.mjs"]
 CMD ["--serve"]

@@ -2,3 +2,7 @@
 !Containerfile
 !worker/
 !worker/**
+!image/package.json
+!image/package-lock.json
+!dist/analyzer/
+!dist/analyzer/**

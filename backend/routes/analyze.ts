@@ -1,101 +1,31 @@
-import Fastify from 'fastify'
+import type { FastifyPluginAsync } from 'fastify'
+import { runPipeline } from '../../analysis/dist/index.js'
+import type { PipelineOptions, PipelineRequest } from '../../analysis/dist/index.js'
+import { sampleCode } from '../sample.ts'
 
-const sampleGraph = `
-{
-  "functions": [
-    {
-      "id": "main",
-      "name": "main",
-      "returnType": "int",
-      "parameters": [],
-      "entryNodeId": "m1",
-      "nodes": [
-        { "id": "m1", "type": "statement", "code": "int *a = malloc(sizeof(int));" },
-        { "id": "m2", "type": "statement", "code": "int *b = malloc(sizeof(int));" },
-        { "id": "m3", "type": "condition", "code": "a == NULL || b == NULL" },
-        { "id": "m4", "type": "statement", "code": "free(a);" },
-        { "id": "m5", "type": "statement", "code": "free(b);" },
-        { "id": "m6", "type": "return", "code": "return 1;" },
-        { "id": "m7", "type": "statement", "code": "printf(\"Please enter the value for a: \");" },
-        { "id": "m8", "type": "condition", "code": "scanf(\"%d\", a) != 1" },
-        { "id": "m9", "type": "statement", "code": "free(a);" },
-        { "id": "m10", "type": "statement", "code": "free(b);" },
-        { "id": "m11", "type": "return", "code": "return 1;" },
-        { "id": "m12", "type": "statement", "code": "printf(\"Please enter the value for b: \");" },
-        { "id": "m13", "type": "condition", "code": "scanf(\"%d\", b) != 1" },
-        { "id": "m14", "type": "statement", "code": "free(a);" },
-        { "id": "m15", "type": "statement", "code": "free(b);" },
-        { "id": "m16", "type": "return", "code": "return 1;" },
-        { "id": "m17", "type": "statement", "code": "int result = calculate(a, b);" },
-        { "id": "m18", "type": "statement", "code": "printf(\"\\nThe result is: %d\\n\", result);" },
-        { "id": "m19", "type": "statement", "code": "free(a);" },
-        { "id": "m20", "type": "statement", "code": "free(b);" },
-        { "id": "m21", "type": "return", "code": "return 0;" }
-      ],
-      "edges": [
-        { "source": "m1", "target": "m2" },
-        { "source": "m2", "target": "m3" },
-        { "source": "m3", "target": "m4", "branch": true },
-        { "source": "m3", "target": "m7", "branch": false },
-        { "source": "m4", "target": "m5" },
-        { "source": "m5", "target": "m6" },
-        { "source": "m7", "target": "m8" },
-        { "source": "m8", "target": "m9", "branch": true },
-        { "source": "m8", "target": "m12", "branch": false },
-        { "source": "m9", "target": "m10" },
-        { "source": "m10", "target": "m11" },
-        { "source": "m12", "target": "m13" },
-        { "source": "m13", "target": "m14", "branch": true },
-        { "source": "m13", "target": "m17", "branch": false },
-        { "source": "m14", "target": "m15" },
-        { "source": "m15", "target": "m16" },
-        { "source": "m17", "target": "m18" },
-        { "source": "m18", "target": "m19" },
-        { "source": "m19", "target": "m20" },
-        { "source": "m20", "target": "m21" }
-      ]
-    },
-    {
-      "id": "calculate",
-      "name": "calculate",
-      "returnType": "int",
-      "parameters": [
-        { "name": "a", "type": "int *" },
-        { "name": "b", "type": "int *" }
-      ],
-      "entryNodeId": "c1",
-      "nodes": [
-        { "id": "c1", "type": "return", "code": "return *a + *b;" }
-      ],
-      "edges": []
-    }
-  ]
-}
-`
+const analysisRoutes: FastifyPluginAsync<{ pipeline: () => Promise<PipelineOptions> }> = async (fastify, { pipeline }) => {
+  fastify.get('/sample', async () => ({ units: [], files: [{ path: 'main.c', text: sampleCode }] }))
 
-async function analysisRoutes(fastify, options) {
-  fastify.route({
-    method: 'GET',
-    url: '/analyze',
+  fastify.post<{ Body: PipelineRequest }>('/analyze', {
     schema: {
-      querystring: {
+      body: {
         type: 'object',
+        required: ['files'],
         properties: {
-          name: { type: 'string' },
-          excitement: { type: 'integer' }
-        }
+          units: { type: 'array', items: { type: 'string' } },
+          entryFile: { type: 'string' },
+          files: { type: 'array', items: { type: 'object', required: ['path', 'text'], properties: { path: { type: 'string' }, text: { type: 'string' } } } },
+          includeDirs: { type: 'array', items: { type: 'string' } },
+          defines: { type: 'array', items: { type: 'string' } },
+          std: { type: 'string' },
+        },
       },
-      response: {
-        200: {
-          type: 'object',
-          properties: {
-            graph: { type: 'string' }
-          }
-        }
-      }
     },
-    handler: function (request, reply) {
-      reply.send({ graph: sampleGraph })
+  }, async (request, reply) => {
+    try {
+      return await runPipeline(request.body, await pipeline())
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) })
     }
   })
 }

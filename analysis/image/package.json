@@ -1,0 +1,10 @@
+{
+  "name": "lexeme-analysis-image",
+  "private": true,
+  "type": "module",
+  "description": "Runtime dependencies of the analyzer inside the worker image.",
+  "dependencies": {
+    "tree-sitter-c": "0.24.1",
+    "web-tree-sitter": "0.27.2"
+  }
+}

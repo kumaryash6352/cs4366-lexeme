@@ -1,3 +1,3 @@
 {
-  "image": "ghcr.io/your-owner/analysiscontainer:v1"
+  "image": "localhost/lexeme-analysis:dev"
 }

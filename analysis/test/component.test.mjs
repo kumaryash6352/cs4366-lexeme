@@ -52,9 +52,12 @@ test('default image comes from the independent configuration file', async () => 
   try {
     const config = JSON.parse(await readFile(new URL('../runtime.config.json', import.meta.url), 'utf8'))
     const fake = fakePodman()
-    const runtime = new PodmanRuntime({ command: fake.command, platform: 'linux' })
+    const runtime = new PodmanRuntime({ command: fake.command, platform: 'linux', buildContext: '/nonexistent' })
     assert.equal(await runtime.ensureReady(), config.image)
-    assert.deepEqual(fake.calls.at(-1), ['podman', 'pull', config.image])
+    // The default image is local, so it is built on demand rather than pulled.
+    const build = fake.calls.at(-1)
+    assert.deepEqual([build[1], build[2], build.at(-3), build.at(-2), build.at(-1)], ['build', '--label', '-t', config.image, '/nonexistent'])
+    assert.match(build[3], /^lexeme\.inputs=[0-9a-f]{16}$/)
   } finally {
     if (savedImage === undefined) delete process.env.LEXEME_ANALYSIS_IMAGE
     else process.env.LEXEME_ANALYSIS_IMAGE = savedImage
@@ -64,7 +67,7 @@ test('default image comes from the independent configuration file', async () => 
 test('registry failures stop startup without falling back to a cached image', async () => {
   const fake = fakePodman({ command: async (_program, args) => args[0] === 'pull'
     ? { code: 125, stdout: '', stderr: 'registry access denied' } : undefined })
-  const runtime = new PodmanRuntime({ command: fake.command, platform: 'linux' })
+  const runtime = new PodmanRuntime({ command: fake.command, platform: 'linux', image: 'ghcr.io/example/analysis:v1' })
   await assert.rejects(runtime.ensureReady(), /registry access denied/)
   assert.ok(!fake.calls.some(call => ['run', 'image', 'build'].includes(call[1])))
 })
@@ -78,8 +81,10 @@ test('missing Podman reports host preparation instructions', async () => {
 
 test('unsupported hosts and nonlocal or rootful Podman fail before image lookup', async () => {
   const unsupported = fakePodman()
-  await assert.rejects(new PodmanRuntime({ command: unsupported.command, platform: 'darwin' }).ensureReady(), /Linux/)
+  await assert.rejects(new PodmanRuntime({ command: unsupported.command, platform: 'freebsd' }).ensureReady(), /Linux/)
   assert.equal(unsupported.calls.length, 0)
+  const rootfulMachine = fakePodman({ command: async (_program, args) => args[0] === 'info' ? ok(JSON.stringify({ host: { serviceIsRemote: true, security: { rootless: false } } })) : undefined })
+  await assert.rejects(new PodmanRuntime({ command: rootfulMachine.command, platform: 'darwin' }).ensureReady(), /rootless Podman machine/)
   for (const host of [
     { serviceIsRemote: true, security: { rootless: true } },
     { serviceIsRemote: false, security: { rootless: false } },
@@ -93,7 +98,7 @@ test('unsupported hosts and nonlocal or rootful Podman fail before image lookup'
 test('Podman failures preserve diagnostics', async () => {
   for (const stage of ['info', 'pull']) {
     const fake = fakePodman({ command: async (_program, args) => args[0] === stage ? { code: 125, stdout: '', stderr: 'storage unavailable' } : undefined })
-    await assert.rejects(new PodmanRuntime({ command: fake.command, platform: 'linux' }).ensureReady(), /storage unavailable/)
+    await assert.rejects(new PodmanRuntime({ command: fake.command, platform: 'linux', image: 'ghcr.io/example/analysis:v1' }).ensureReady(), /storage unavailable/)
     assert.deepEqual(fake.calls.map(call => call[1]), stage === 'info' ? ['--version', 'info'] : ['--version', 'info', 'pull'])
   }
 })
@@ -369,4 +374,61 @@ test('package execution timeout retires the session before GCC runs', async t =>
   assert.match(completed.error, /timed out/)
   assert.equal(fixture.containers.size, 0)
   assert.equal(fixture.executions(), 0)
+})
+
+test('container memory and PID limits are configurable and validated', async t => {
+  const fake = fakePodman()
+  const environment = new PodmanRuntime({ command: fake.command, platform: 'linux', image: 'ghcr.io/example/analysis:v1' })
+  const jobsRoot = await mkdtemp(join(tmpdir(), 'lexeme-limits-'))
+  t.after(() => rm(jobsRoot, { recursive: true, force: true }))
+  const service = new AnalysisService({ environment, jobsRoot, memory: '2g', pidsLimit: 256 })
+  await service.start()
+  const run = fake.calls.find(call => call[1] === 'run')
+  assert.ok(run.includes('--memory=2g') && run.includes('--pids-limit=256'))
+  await service.shutdown()
+  assert.throws(() => new AnalysisService({ environment, jobsRoot, memory: '2 gigs' }))
+  assert.throws(() => new AnalysisService({ environment, jobsRoot, pidsLimit: 1 }))
+})
+
+test('macOS uses a rootless Podman machine; pull=missing reuses a local image', async () => {
+  const machineInfo = JSON.stringify({ host: { serviceIsRemote: true, security: { rootless: true } } })
+  const fake = fakePodman({ command: async (_program, args) => args[0] === 'info' ? ok(machineInfo) : args[0] === 'image' ? ok() : undefined })
+  const image = 'ghcr.io/example/analysis:v1'
+  const runtime = new PodmanRuntime({ command: fake.command, platform: 'darwin', image, pull: 'missing' })
+  assert.equal(await runtime.ensureReady(), image)
+  assert.deepEqual(fake.calls.map(call => call[1]), ['--version', 'info', 'image'])
+})
+
+test('analyze requests validate every unit and stage an analyze job', async t => {
+  assert.throws(() => parseRequest(request({ operation: 'analyze', source: 'x' })), /units/)
+  assert.throws(() => parseRequest(request({ operation: 'analyze', source: 'x', units: [{ file: '../a.c' }] })))
+  assert.throws(() => parseRequest(request({ operation: 'analyze', source: 'x', units: [{ file: 'a.c', std: 'c++17' }] })), /standard/)
+  const parsed = parseRequest(request({ operation: 'analyze', source: 'int main(void){}', units: [{ file: 'main.c', defines: ['X=1'] }] }))
+  assert.deepEqual(parsed.units, [{ file: 'main.c', includeDirs: [], defines: ['X=1'], std: 'c11' }])
+  assert.equal(parsed.entryFile, 'main.c')
+  const fake = fakePodman()
+  const environment = new PodmanRuntime({ command: fake.command, platform: 'linux', image: 'ghcr.io/example/analysis:v1' })
+  const jobsRoot = await mkdtemp(join(tmpdir(), 'lexeme-analyze-'))
+  t.after(() => rm(jobsRoot, { recursive: true, force: true }))
+  const service = new AnalysisService({ environment, jobsRoot })
+  await service.start()
+  const job = service.submit(request({ operation: 'analyze', source: 'int main(void){return 0;}', units: [{ file: 'main.c' }] }))
+  await service.wait(job.id)
+  const staged = JSON.parse(await readFile(join(service.jobsRoot, job.id, 'input', 'request.json'), 'utf8'))
+  assert.equal(staged.operation, 'analyze')
+  assert.deepEqual(staged.units, [{ file: 'main.c', includeDirs: [], defines: [], std: 'c11' }])
+  await service.shutdown()
+})
+
+test('local images are reused while their inputs are unchanged, rebuilt otherwise, never pulled', async () => {
+  const { imageInputsHash } = await import('../dist/environment.js')
+  const context = new URL('..', import.meta.url).pathname
+  const current = await imageInputsHash(context)
+  for (const [label, rebuilt] of [[current, false], ['stale', true]]) {
+    const fake = fakePodman({ command: async (_program, args) => args[0] === 'image' ? ok(`${label}\n`) : undefined })
+    const runtime = new PodmanRuntime({ command: fake.command, platform: 'linux', image: 'localhost/lexeme-analysis:dev', buildContext: context })
+    await runtime.ensureReady()
+    assert.equal(fake.calls.some(call => call[1] === 'build'), rebuilt)
+    assert.ok(!fake.calls.some(call => call[1] === 'pull'))
+  }
 })

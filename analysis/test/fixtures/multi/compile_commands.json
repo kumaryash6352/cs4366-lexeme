@@ -1,0 +1,4 @@
+[
+  { "directory": "/work/multi", "file": "/work/multi/src/main.c", "arguments": ["cc", "-I/work/multi/include", "-std=c11", "-c", "src/main.c"] },
+  { "directory": "/work/multi", "file": "src/counter.c", "command": "cc -Iinclude -std=c11 -c src/counter.c" }
+]

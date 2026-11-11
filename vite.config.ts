@@ -5,4 +5,6 @@ import { defineConfig } from 'vite'
 export default defineConfig({
   base: './',
   plugins: [react()],
+  // Forward API calls to `npm run backend` during development.
+  server: { proxy: { '/api': `http://127.0.0.1:${process.env.LEXEME_PORT ?? 3000}` } },
 })

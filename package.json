@@ -4,21 +4,31 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsc -p tsconfig.electron.json && node scripts/dev.mjs",
-    "build": "tsc -b && vite build",
+    "dev": "npm run build:analysis && tsc -p tsconfig.electron.json && node scripts/dev.mjs",
+    "build": "npm run build:analysis && tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
     "dev:web": "vite --host 127.0.0.1",
-    "start": "electron .",
-    "typecheck": "tsc -b"
+    "start": "node scripts/dev.mjs --built",
+    "typecheck": "npm run build:analysis && tsc -b",
+    "backend": "npm run build:analysis && node backend/app.ts",
+    "build:analysis": "tsc -p analysis/tsconfig.json",
+    "test": "npm run build:analysis && node --test analysis/test/*.test.mjs backend/test/*.test.mjs src/*.test.mjs",
+    "image": "npm run build:analysis && podman build -t localhost/lexeme-analysis:dev analysis",
+    "test:container": "npm run build:analysis && node --test analysis/test/container.integration.mjs"
   },
   "dependencies": {
+    "elkjs": "^0.11.1",
     "fastify": "^5.12.7",
+    "prismjs": "^1.30.0",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react-dom": "^19.3.1",
+    "tree-sitter-c": "^0.24.1",
+    "web-tree-sitter": "^0.27.2"
   },
   "devDependencies": {
     "@types/node": "^24.19.2",
+    "@types/prismjs": "^1.26.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
@@ -29,6 +39,6 @@
   },
   "main": "dist-electron/main.js",
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.18.0"
   }
 }

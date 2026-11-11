@@ -8,12 +8,18 @@ import { analysisRoot } from './config.js'
 import { PodmanRuntime } from './environment.js'
 import { stageRequest } from './staging.js'
 import { installPackages } from './packages.js'
+import { DEFAULT_MEMORY, DEFAULT_PIDS_LIMIT, DEFAULT_TIMEOUT_MS, MAX_JOBS_PER_SESSION, MAX_RESULT_BYTES, MAX_TIMEOUT_MS, WORKER_LOG_CHARS } from './limits.js'
 
 interface Job { snapshot: JobSnapshot; controller: AbortController; done: Promise<void>; finished: boolean }
 export interface ServiceOptions {
   environment?: PodmanRuntime
   jobsRoot?: string
+  /** Per-job compiler deadline in milliseconds (1 to 600000). */
   timeoutMs?: number
+  /** Podman --memory value for the session container, e.g. '512m' or '2g'. */
+  memory?: string
+  /** Podman --pids-limit for the session container. */
+  pidsLimit?: number
 }
 
 /** One application session owns one persistent container and a serial job queue. */
@@ -26,8 +32,11 @@ export class AnalysisService {
   private startup: Promise<void> | undefined
   private shutdownPromise: Promise<void> | undefined
   private timeoutMs: number
+  private memory: string
+  private pidsLimit: number
   private closed = false
-  private containerMayExist = false
+  /** True from `podman run` until `podman rm` succeeds. */
+  private containerNeedsCleanup = false
   private runtimeFailure: string | undefined
 
   constructor(options: ServiceOptions = {}) {
@@ -36,10 +45,14 @@ export class AnalysisService {
     this.containerName = `lexeme-session-${sessionId}`
     this.jobsRoot = resolve(options.jobsRoot ?? join(analysisRoot, '.jobs'), sessionId)
     if (/[:,\n\r]/.test(this.jobsRoot)) throw new Error('jobsRoot cannot contain colon, comma, or newline characters')
-    this.timeoutMs = options.timeoutMs ?? 60_000
-    if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > 600_000) {
-      throw new Error('timeoutMs must be an integer between 1 and 600000')
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > MAX_TIMEOUT_MS) {
+      throw new Error(`timeoutMs must be an integer between 1 and ${MAX_TIMEOUT_MS}`)
     }
+    this.memory = options.memory ?? DEFAULT_MEMORY
+    if (!/^\d+[bkmg]?$/i.test(this.memory)) throw new Error('memory must be a Podman size such as 512m or 2g')
+    this.pidsLimit = options.pidsLimit ?? DEFAULT_PIDS_LIMIT
+    if (!Number.isInteger(this.pidsLimit) || this.pidsLimit < 16) throw new Error('pidsLimit must be an integer of at least 16')
   }
 
   /** Call once at application startup, before accepting parsing requests. */
@@ -54,14 +67,14 @@ export class AnalysisService {
       const image = await this.environment.ensureReady(notify)
       if (this.closed) throw new Error('Application shut down during analysis startup')
       await mkdir(this.jobsRoot, { recursive: true })
-      this.containerMayExist = true
+      this.containerNeedsCleanup = true
       notify('starting-container', this.containerName)
       assertSuccess(await this.environment.command('podman', [
         // ensureReady pulled the registry image. Default networking and capabilities
         // allow apt to download packages and set ownership inside this rootless container.
         'run', '--detach', '--name', this.containerName, '--pull=never',
         '--userns=keep-id', '--security-opt=no-new-privileges',
-        '--memory=512m', '--pids-limit=128', '--volume', `${this.jobsRoot}:/jobs:Z`, image, '--serve',
+        `--memory=${this.memory}`, `--pids-limit=${this.pidsLimit}`, '--volume', `${this.jobsRoot}:/jobs:Z`, image, '--serve',
       ]), 'Persistent container startup')
       if (this.closed) throw new Error('Application shut down during analysis startup')
       notify('verifying-worker', 'Checking the worker in the persistent container')
@@ -70,7 +83,7 @@ export class AnalysisService {
       ]), 'Worker self-check')
       notify('ready', this.containerName)
     } catch (error) {
-      if (this.containerMayExist) await this.removeContainer()
+      if (this.containerNeedsCleanup) await this.removeContainer()
       throw error
     }
   }
@@ -81,7 +94,7 @@ export class AnalysisService {
     if (!this.startup) throw new Error('Call analysis.start() at application startup before submitting requests')
     if (this.runtimeFailure) throw new Error(this.runtimeFailure)
     const request = parseRequest(value)
-    if (this.jobs.size >= 100) throw new Error('Prototype session limit reached (100 jobs); start a new application session')
+    if (this.jobs.size >= MAX_JOBS_PER_SESSION) throw new Error(`Prototype session limit reached (${MAX_JOBS_PER_SESSION} jobs); start a new application session`)
     const id = randomUUID()
     const job: Job = { snapshot: { id, status: 'queued', events: [] }, controller: new AbortController(), done: Promise.resolve(), finished: false }
     this.jobs.set(id, job)
@@ -98,8 +111,11 @@ export class AnalysisService {
     return snapshot
   }
 
+  /** The job's output file: main.i for `parse`, analysis.json for `analyze`. */
   artifactPath(id: string): string | undefined {
-    return this.get(id)?.status === 'succeeded' ? join(this.jobsRoot, id, 'output', 'main.i') : undefined
+    const job = this.get(id)
+    const artifact = job?.status === 'succeeded' ? job.result?.artifacts[0] : undefined
+    return artifact ? join(this.jobsRoot, id, 'output', artifact.path) : undefined
   }
 
   cancel(id: string): boolean {
@@ -129,12 +145,12 @@ export class AnalysisService {
     for (const id of this.jobs.keys()) this.cancel(id)
     await this.startup?.catch(() => {})
     await this.queue
-    if (this.containerMayExist) await this.removeContainer()
+    if (this.containerNeedsCleanup) await this.removeContainer()
   }
 
   private async removeContainer(): Promise<void> {
     assertSuccess(await this.environment.command('podman', ['rm', '--force', '--ignore', this.containerName]), 'Session container cleanup')
-    this.containerMayExist = false
+    this.containerNeedsCleanup = false
   }
 
   private event(job: Job, stage: string, message: string): void {
@@ -189,10 +205,10 @@ export class AnalysisService {
           // The worker observes cancellation and kills its compiler process group.
           // Killing only the host exec client could leave the compiler running.
           timeoutMs: this.timeoutMs + 10_000,
-          onStderr: text => { log = (log + text).slice(-65536) },
+          onStderr: text => { log = (log + text).slice(-WORKER_LOG_CHARS) },
           onStdout: text => {
             pending += text
-            if (pending.length > 65536) { pending = ''; return }
+            if (pending.length > WORKER_LOG_CHARS) { pending = ''; return }
             let end: number
             while ((end = pending.indexOf('\n')) >= 0) {
               const line = pending.slice(0, end)
@@ -200,7 +216,7 @@ export class AnalysisService {
               try {
                 const event = JSON.parse(line)
                 if (event.type === 'progress' && typeof event.stage === 'string') this.event(job, event.stage, event.stage)
-              } catch { log = (log + line + '\n').slice(-65536) }
+              } catch { log = (log + line + '\n').slice(-WORKER_LOG_CHARS) }
             }
           },
         })
@@ -212,11 +228,12 @@ export class AnalysisService {
       }
       signal.throwIfAborted()
       const resultPath = join(jobDir, 'output', 'result.json')
-      if ((await stat(resultPath)).size > 1024 * 1024) throw new Error('Worker result exceeds 1 MiB')
+      if ((await stat(resultPath)).size > MAX_RESULT_BYTES) throw new Error('Worker result exceeds 1 MiB')
       const result = parseResult(JSON.parse(await readFile(resultPath, 'utf8')), job.snapshot.id)
       if (result.status === 'succeeded') {
         assertSuccess(run, 'Worker process')
-        if (!(await stat(join(jobDir, 'output', 'main.i'))).isFile()) throw new Error('Worker omitted main.i')
+        const artifact = result.artifacts[0]!.path
+        if (!(await stat(join(jobDir, 'output', artifact))).isFile()) throw new Error(`Worker omitted ${artifact}`)
       } else if (run.code === 0) throw new Error('Worker reported failure but exited successfully')
       job.snapshot.result = result
       job.snapshot.status = result.status
