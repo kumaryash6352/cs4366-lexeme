@@ -25,18 +25,18 @@ node --test analysis/test/*.test.mjs
 node --test analysis/test/component.test.mjs
 ```
 
-## Container smoke test
+## Container run
 
-Check actual GCC processing, valid/invalid C inputs, container reuse, cancellation,
-and cleanup. Requires Linux, working rootless Podman, and the configured image
-available locally. See [runtime details](../README.md#runtime).
+Runs one real job: GCC syntax check and preprocessing of `project/main.c`, with
+`zlib1g-dev` installed as a sample dependency. Requires Linux, rootless Podman,
+and the configured image. See [runtime details](../README.md#runtime).
 
 ```sh
-node analysis/test/smoke.mjs
+node analysis/test/backend-call.mjs
+node analysis/test/backend-call.mjs ~/cJSON cJSON.c   # another project
 ```
 
-Inputs: `test_cfiles/` and `parse-request.json`. Job outputs remain in `analysis/.jobs/`.
-Invalid C samples are expected to fail; the overall test should exit with code 0.
+Job outputs remain in `analysis/.jobs/`.
 
 ## Type and lint checks
 

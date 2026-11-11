@@ -1,0 +1,25 @@
+#+title: Needs
+
+* control flow graph
+
+gl
+
+useful sources:
+https://gcc.gnu.org/onlinedocs/gccint/Control-Flow.html
+
+* function call graph
+
+gnu cflow
+
+* include graph
+
+should be trivial w.r.t gcc gives us
+
+* data flow graph
+
+gl pt 2.
+
+useful sources:
+https://clang.llvm.org/docs/DataFlowAnalysisIntro.html
+
+

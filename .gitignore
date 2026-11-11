@@ -27,4 +27,7 @@ dist-ssr
 dist-electron
 
 #build info 
-*.tsbuldinfo
+*.tsbuildinfo
+
+# Fetched test codebases (scripts/fetch-codebases.sh)
+analysis/test/codebases/

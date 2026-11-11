@@ -1,6 +1,0 @@
-on line 13:
-```
-export class PodmanRuntime {
-```
- comment: 'runtime may want to be one to many w.r.t. cotnainers'
-
