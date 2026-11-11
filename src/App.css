@@ -38,9 +38,44 @@ footer { display: flex; justify-content: space-between; padding: 10px 22px; bord
 .error-message, .success-message { margin: 0; padding: 8px 12px; font-size: 12px; }
 .error-message {color: #f87171;}
 .success-message {color: #4ade80;}
-.graph-stage { flex: 1; min-height: 0; display: flex; }
-.graph-stage svg { width: 100%; height: 100%; cursor: grab; }
-.graph-stage svg:active { cursor: grabbing; }
-.box { cursor: pointer; }
-.box text { fill: white; stroke: none; font: 13px sans-serif; pointer-events: none; dominant-baseline: middle; }
-.edge-label { fill: white; stroke: none; font: 12px sans-serif; }
+/* Progressive graph disclosure follows the Stage 2 linked flowchart design. */
+.graph-header > div:first-child { display: flex; flex-direction: column; gap: 4px; }
+.project-summary { color: #8d9bb0; font-size: 10px; }
+.graph-controls { display: flex; align-items: center; gap: 10px; }
+.function-picker { display: flex; align-items: center; gap: 6px; color: #9aa8bc; font-size: 11px; }
+.function-picker select { max-width: 130px; padding: 5px 7px; color: #d9e5f7; background: #18212e; border: 1px solid #35455f; border-radius: 5px; }
+.zoom-controls { display: flex; gap: 4px; }
+.zoom-controls button { min-width: 30px; padding: 5px 7px; }
+.graph-canvas { position: relative; flex: 1; min-height: 0; overflow: hidden; }
+.graph-canvas > svg { width: 100%; height: 100%; cursor: grab; touch-action: none; }
+.graph-canvas > svg:active { cursor: grabbing; }
+.graph-breadcrumb { position: absolute; z-index: 2; top: 12px; left: 12px; display: flex; align-items: center; gap: 9px; max-width: calc(100% - 24px); padding: 6px; color: #aebbd0; background: rgba(17, 23, 32, .94); border: 1px solid #35455f; border-radius: 7px; box-shadow: 0 6px 20px #070a0f66; font-size: 11px; }
+.graph-breadcrumb span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cfg-edge path { fill: none; stroke: #71819a; stroke-width: 2; }
+.cfg-edge.true path { stroke: #65c997; }
+.cfg-edge.false path { stroke: #e99595; }
+.cfg-edge text { fill: #c6d6f1; font-size: 12px; paint-order: stroke; stroke: #111720; stroke-width: 5px; }
+.cfg-node { cursor: default; }
+.cfg-node.block { cursor: pointer; }
+.cfg-node:focus { outline: none; }
+.cfg-node:focus .cfg-node-frame { stroke: #d3e4ff; stroke-width: 3px; }
+.cfg-node-frame { fill: #263651; stroke: #6f8fbd; stroke-width: 1.5px; transition: fill .15s, stroke .15s; }
+.cfg-node.entry .cfg-node-frame, .cfg-node.exit .cfg-node-frame { fill: #513b6c; stroke: #b58adb; }
+.cfg-node.block:hover .cfg-node-frame, .cfg-node.expanded .cfg-node-frame { fill: #2b4265; stroke: #9fc3ff; }
+.cfg-node text { font-family: 'SFMono-Regular', Consolas, monospace; pointer-events: none; }
+.cfg-node-kind { fill: #9ebceb; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.cfg-node-label { fill: #e1e9f5; font-size: 12px; }
+.cfg-node-location { fill: #8d9bb0; font-size: 9px; }
+.cfg-expand-control { cursor: pointer; }
+.cfg-expand-control circle { fill: #16243a; stroke: #7597c8; }
+.cfg-expand-control text { fill: #dbe9ff; font: 15px sans-serif; }
+.cfg-statement { cursor: default; }
+.cfg-statement rect { fill: #172335; stroke: #506b91; stroke-width: 1px; }
+.cfg-statement:hover rect { fill: #1d2d44; stroke: #7fa8df; }
+.cfg-statement-label { fill: #e4ebf6; font-size: 10px; cursor: pointer; pointer-events: all !important; }
+.cfg-statement-label:hover { fill: #fff; text-decoration: underline; }
+.cfg-statement-location { fill: #8190a5; font-size: 8px; }
+.cfg-inline-call { cursor: pointer; }
+.cfg-inline-call rect { fill: #355d8f; stroke: #82b3ed; }
+.cfg-inline-call:hover rect, .cfg-inline-call:focus rect { fill: #4779b4; stroke: #c5e0ff; }
+.cfg-inline-call text { fill: #eef7ff; font: 8px sans-serif; }

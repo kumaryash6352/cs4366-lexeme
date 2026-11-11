@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import type { InputHTMLAttributes, ReactNode } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import type { InputHTMLAttributes } from 'react'
+import { GraphWorkspace } from './GraphWorkspace.tsx'
 import { openWorkspace } from './project-api.ts'
 import type { ProjectAnalysis, SourceSpan } from '../shared/analysis.ts'
 import './App.css'
@@ -47,109 +48,7 @@ int calculate(int *a, int *b) {
 `
 
 type Selection = Pick<SourceSpan, 'file' | 'startLine' | 'startColumn' | 'endLine' | 'endColumn'>
-type FlowNode = {
-  name: string
-  kind: 'endpoint' | 'process' | 'conditional' | 'io'
-  selection?: Selection
-  children: { target: number; label?: string }[]
-}
 type SourceFile = { name: string; path: string; content: string }
-type Position = { x: number; y: number }
-
-function FlowBox({ block, x, y, onSelect }: { block: FlowNode; x: number; y: number; onSelect: (selection: Selection) => void }) {
-  const highlightColour = '#77B', normalColour = '#559'
-  const shape = {
-    endpoint: [[-80, -75], [80, -75], [100, -55], [100, 55], [80, 75], [-80, 75], [-100, 55], [-100, -55]],
-    process: [[-100, -75], [100, -75], [100, 75], [-100, 75]],
-    conditional: [[-100, 0], [0, -75], [100, 0], [0, 75]],
-    io: [[-80, -75], [120, -75], [80, 75], [-120, 75]],
-  }[block.kind]
-  const points = shape.map(([pointX, pointY]) => `${pointX! + x},${pointY! + y}`).join(' ')
-  const label = block.name.length > 30 ? `${block.name.slice(0, 29)}…` : block.name
-
-  return <g className="box" fill={normalColour} stroke="white" strokeWidth="1.5">
-    <polygon points={points}
-      onMouseOver={event => event.currentTarget.setAttribute('fill', highlightColour)}
-      onMouseOut={event => event.currentTarget.setAttribute('fill', normalColour)}
-      onClick={() => { if (block.selection) onSelect(block.selection) }} />
-    <text className="noselect" x={x} y={y} textAnchor="middle">{label}</text>
-  </g>
-}
-
-function Arrow({ x1, y1, x2, y2, text }: { x1: number; y1: number; x2: number; y2: number; text?: string }) {
-  const targetOffsetX = x1 === x2 ? 0 : x1 > x2 ? 35 : -35
-  const targetOffsetY = y1 === y2 ? 0 : y1 > y2 ? 85 : -85
-  return <g>
-    <path d={`M ${x1} ${y1} L ${x2 + targetOffsetX} ${y2 + targetOffsetY}`}
-      strokeWidth="2" stroke="white" fill="none" markerEnd="url(#arrow)" />
-    {text && <text stroke="white" className="noselect edge-label" x={(x1 + x2) / 2} y={(y1 + y2) / 2}>{text}</text>}
-  </g>
-}
-
-function FlowChart({ graph, startNode, onSelect }: { graph: FlowNode[]; startNode: number; onSelect: (selection: Selection) => void }): ReactNode {
-  const positions: (Position | undefined)[] = new Array(graph.length)
-  const queue = [startNode]
-  const nodes: ReactNode[] = [], arrows: ReactNode[] = []
-  positions[startNode] = { x: 0, y: 100 }
-  let key = 0
-
-  while (queue.length) {
-    const index = queue.pop()!
-    const node = graph[index], position = positions[index]
-    if (!node || !position) continue
-    nodes.push(<FlowBox key={`node-${index}`} block={node} x={position.x} y={position.y} onSelect={onSelect} />)
-    node.children.forEach((child, childIndex) => {
-      if (!graph[child.target]) return
-      if (!positions[child.target]) {
-        positions[child.target] = {
-          x: position.x + (childIndex - (node.children.length - 1) / 2) * 300,
-          y: position.y + 220,
-        }
-        queue.push(child.target)
-      }
-      const target = positions[child.target]!
-      arrows.push(<Arrow key={`edge-${key++}`} x1={position.x} y1={position.y}
-        x2={target.x} y2={target.y} {...(child.label ? { text: child.label } : {})} />)
-    })
-  }
-  return <>{arrows}{nodes}</>
-}
-
-function backendFlow(analysis: ProjectAnalysis | null) {
-  if (!analysis || analysis.status !== 'succeeded') return undefined
-  const names = new Map(analysis.graph.calls.nodes.map(node => [node.id, node.name]))
-  const flow = analysis.graph.controlFlow.find(item => names.get(item.functionId) === 'main') ?? analysis.graph.controlFlow[0]
-  if (!flow) return undefined
-  const indexes = new Map(flow.nodes.map((node, index) => [node.id, index]))
-  const graph: FlowNode[] = flow.nodes.map(node => {
-    const semantic = node.semanticKind
-    const kind: FlowNode['kind'] = node.kind === 'entry' || node.kind === 'exit' ? 'endpoint'
-      : semantic === 'condition' || semantic === 'loop' ? 'conditional'
-      : semantic === 'call' ? 'io' : 'process'
-    const source = node.source
-    const location = node.locations[0]
-    const selection = source ? {
-      file: source.file, startLine: source.startLine, startColumn: source.startColumn,
-      endLine: source.endLine, endColumn: source.endColumn,
-    } : location ? {
-      file: location.file, startLine: location.line, startColumn: location.column ?? 1,
-      endLine: location.line, endColumn: (location.column ?? 1) + 1,
-    } : undefined
-    return {
-      name: node.label || node.kind,
-      kind,
-      ...(selection ? { selection } : {}),
-      children: flow.edges.filter(edge => edge.source === node.id).flatMap(edge => {
-        const target = indexes.get(edge.target)
-        return target === undefined ? [] : [{ target, ...(edge.kind === 'flow' ? {} : { label: edge.label ?? edge.kind }) }]
-      }),
-    }
-  })
-  return { graph, startNode: flow.nodes.findIndex(node => node.kind === 'entry'), functionName: names.get(flow.functionId) ?? flow.functionId }
-}
-
-const viewboxBoundaries = { xMin: -1000, xMax: 200, yMin: -800, yMax: 1000, zoomMin: 300, zoomMax: 1800 }
-const flowchartView = { x: (viewboxBoundaries.xMax + viewboxBoundaries.xMin) / 2, y: 0, zoom: 1000 }
 
 function sourceOffset(content: string, line: number, column: number) {
   const lines = content.split('\n')
@@ -167,9 +66,6 @@ function validProject(value: unknown): value is { projectName?: string; files: S
 
 export default function App() {
   const [selectionIndex, setSelectionIndex] = useState(0)
-  const [panning, setPanning] = useState(false)
-  const [flowchartViewbox, setViewbox] = useState([flowchartView.x, flowchartView.y, flowchartView.zoom, flowchartView.zoom])
-  const flowchartRef = useRef<SVGSVGElement | null>(null)
   const sourceRef = useRef<HTMLTextAreaElement | null>(null)
   const pendingSelection = useRef<Selection | null>(null)
   const [projectName, setProjectName] = useState('My Lexeme Project')
@@ -182,7 +78,6 @@ export default function App() {
   const [analysisError, setAnalysisError] = useState('')
   const [analysisResult, setAnalysisResult] = useState<ProjectAnalysis | null>(null)
   const currentFile = files.find(file => file.path === activeFile)
-  const controlFlow = useMemo(() => backendFlow(analysisResult), [analysisResult])
 
   useEffect(() => {
     const selection = pendingSelection.current
@@ -277,20 +172,6 @@ export default function App() {
     }
   }
 
-  function panViewbox(dx: number, dy: number) {
-    flowchartView.x = Math.max(viewboxBoundaries.xMin, Math.min(viewboxBoundaries.xMax, flowchartView.x - dx * flowchartView.zoom / 1000))
-    flowchartView.y = Math.max(viewboxBoundaries.yMin, Math.min(viewboxBoundaries.yMax, flowchartView.y - dy * flowchartView.zoom / 1000))
-  }
-
-  function zoomViewbox(cx: number, cy: number, amount: number) {
-    if (!flowchartRef.current) return
-    const oldZoom = flowchartView.zoom
-    flowchartView.zoom = Math.max(viewboxBoundaries.zoomMin, Math.min(viewboxBoundaries.zoomMax, oldZoom + amount / 3))
-    const offset = oldZoom - flowchartView.zoom
-    flowchartView.x += cx / flowchartRef.current.getBoundingClientRect().width * offset
-    flowchartView.y += cy / flowchartRef.current.getBoundingClientRect().height * offset
-  }
-
   function selectGraphSource(selection: Selection) {
     const file = files.find(item => item.path === selection.file)
     if (!file) return
@@ -298,7 +179,7 @@ export default function App() {
     setActiveFile(file.path)
   }
 
-  return <main className="app" onMouseUp={() => setPanning(false)}>
+  return <main className="app">
     <header className="toolbar noselect">
       <div className="brand"><span className="logo">🐟</span><h1>lexeme</h1></div>
       <span className="subtitle">code explorer</span>
@@ -358,34 +239,8 @@ export default function App() {
           spellCheck={false} aria-label="C source code" />
       </section>
 
-      <section className="pane graph-pane" aria-labelledby="graph-title">
-        <div className="pane-header noselect">
-          <h2 id="graph-title">Graph workspace</h2>
-          <span className="muted">{controlFlow ? `Control flow · ${controlFlow.functionName}` : 'Control flow'}</span>
-        </div>
-        <div className="graph-stage">
-          {controlFlow ? <svg id="FLOWCHART" viewBox={flowchartViewbox.join(' ')} ref={flowchartRef}
-            onMouseDown={() => setPanning(true)}
-            onMouseMove={event => {
-              if (!panning) return
-              panViewbox(event.movementX, event.movementY)
-              setViewbox([flowchartView.x, flowchartView.y, flowchartView.zoom, flowchartView.zoom])
-            }}
-            onWheel={event => {
-              zoomViewbox(event.nativeEvent.offsetX, event.nativeEvent.offsetY, event.deltaY)
-              setViewbox([flowchartView.x, flowchartView.y, flowchartView.zoom, flowchartView.zoom])
-            }}>
-            <defs><marker id="arrow" viewBox="-5 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-              <path d="M -5 0 L 5 5 L -5 10 z" fill="white" />
-            </marker></defs>
-            <FlowChart graph={controlFlow.graph} startNode={Math.max(0, controlFlow.startNode)} onSelect={selectGraphSource} />
-          </svg> : <div className="empty-state">
-            <div className="graph-mark noselect" aria-hidden="true">◇</div>
-            <h3 className="noselect">Control flow will appear here</h3>
-            <p className="muted">Import or edit a C project, then select Analyze Project.</p>
-          </div>}
-        </div>
-      </section>
+      <GraphWorkspace key={analysisResult?.jobId ?? 'empty'} projectName={projectName}
+        {...(analysisResult ? { analysis: analysisResult } : {})} onOpenSource={selectGraphSource} />
     </div>
     <footer><span>{projectName}</span><span>{currentFile?.content.trimEnd().split('\n').length ?? 0} lines · cursor {selectionIndex} · React + TypeScript</span></footer>
   </main>
